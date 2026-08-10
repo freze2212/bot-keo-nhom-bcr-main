@@ -1,0 +1,61 @@
+{
+  "auth": {
+    "loginStatus": 201,
+    "token": "eyJhbGciOiJIUzI1NiIsInR5..."
+  },
+  "api": {
+    "status": 200,
+    "bodyLen": 14364
+  },
+  "page": {
+    "url": "http://localhost:3000/casino/room/C04",
+    "title": "A.I BACCARAT VIP",
+    "bodySnippet": "bminr88 Bạn cần nạp thêm 1.000.000 điểm để đạt VIP 0 ĐĂNG XUẤT >_version 1.09 BÀN BACCARAT C04 SEVER: ASIA_SEXY_V1 | STATUS: ONLINE >> NHẬT KÝ HỆ THỐNG [11:37:36] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:38:21] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:39:04] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:40:01] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:40:43] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:41:23] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:42:02] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:42:45] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:43:24] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:44",
+    "apiCalls": [
+      {
+        "status": 200,
+        "url": "http://localhost:3201/predict/get-table-by-name?tableName=C04",
+        "len": 14364
+      },
+      {
+        "status": 200,
+        "url": "http://localhost:3201/predict/get-table-by-name?tableName=C04",
+        "len": 14364
+      },
+      {
+        "status": 200,
+        "url": "http://localhost:3201/predict/get-table-by-name?tableName=C04",
+        "len": 14364
+      }
+    ]
+  },
+  "checks": {
+    "hasTableName": true,
+    "hasPercentCurrent": true,
+    "percentHasRound": true,
+    "hasTotalRound": true,
+    "totalRoundCount": 66,
+    "totalRoundSampleFields": {
+      "keys": [
+        "id",
+        "stampTime",
+        "showX",
+        "showY",
+        "count",
+        "road",
+        "win",
+        "roadFormat",
+        "roadRandom"
+      ],
+      "hasStampTime": true,
+      "hasResult": true
+    },
+    "hasAi0": true,
+    "hasAi1": true,
+    "hasTimeCurrent": true,
+    "hasDealerImage": true,
+    "maintenance": 0,
+    "shuffle": 0,
+    "okForFeRoad": true
+  }
+}

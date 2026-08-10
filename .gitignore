@@ -1,0 +1,31 @@
+# Thông tin nhạy cảm
+.env
+
+# File dữ liệu runtime
+posts.json
+bot.lock
+
+# File log / backup
+*.log
+logs/
+
+# Thư mục cache, pyc
+__pycache__/
+*.pyc
+venv/
+
+# Bỏ qua file user_session (Telethon session)
+user_session*
+*.session
+*.session-journal
+
+# Bỏ qua thư mục 311
+311/
+
+# Node dependencies
+node_modules/
+public/screenshots/
+diag-*.png
+diag-*.json
+*.rar
+hotudong.rar

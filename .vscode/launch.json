@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "SS5",
+      "skipFiles": ["node_modules/**"],
+      "cwd": "${workspaceRoot}",
+      "internalConsoleOptions": "openOnSessionStart",
+      "args": [
+        "node",
+        "./servicePuppeteer/session5.js"
+      ],
+      "console": "integratedTerminal",
+      "runtimeArgs": ["--unhandled-rejections=strict", "--nolazy"],
+      "env": {
+        "PORT": "5001",
+      }
+    },
+  ]
+}

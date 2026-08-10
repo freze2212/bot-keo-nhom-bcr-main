@@ -1,0 +1,39 @@
+{
+  "apiCalls": [
+    {
+      "status": 204,
+      "len": 0,
+      "totalRound": 0,
+      "hasPercent": false
+    },
+    {
+      "status": 200,
+      "len": 42632,
+      "tableName": "C04",
+      "totalRound": 208,
+      "hasPercent": true,
+      "round": "P"
+    },
+    {
+      "status": 200,
+      "len": 42632,
+      "tableName": "C04",
+      "totalRound": 208,
+      "hasPercent": true,
+      "round": "P"
+    },
+    {
+      "status": 200,
+      "len": 42632,
+      "tableName": "C04",
+      "totalRound": 208,
+      "hasPercent": true,
+      "round": "P"
+    }
+  ],
+  "page": {
+    "url": "http://localhost:3000/casino/room/C04",
+    "title": "A.I BACCARAT VIP",
+    "text": "bminr88 Bạn cần nạp thêm 1.000.000 điểm để đạt VIP 0 ĐĂNG XUẤT >_version 1.09 BÀN BACCARAT C04 SEVER: ASIA_SEXY_V1 | STATUS: ONLINE >> NHẬT KÝ HỆ THỐNG [11:37:15] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:37:56] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:38:40] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:39:23] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:40:32] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:41:16] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:42:03] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:42:53] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:43:39] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:44:31] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:46:48] >> ĐỒNG BỘ THÀNH CÔNG [OK] [11:47:37] >> ĐỒNG BỘ THÀNH CÔ"
+  }
+}

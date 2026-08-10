@@ -1,0 +1,645 @@
+﻿{
+    "tableName":  "C04",
+    "maintenance":  0,
+    "dealerImage":  "https://vcnh2k.gklam.com/images/player/dealers/png/1501009-3.png",
+    "iTime":  24,
+    "roundStartTime":  1783758620572,
+    "shuffle":  0,
+    "statusGame":  "UNDEFINED",
+    "percentCurrent":  {
+                           "Player":  32,
+                           "Tier":  4,
+                           "Banker":  64,
+                           "Round":  "B",
+                           "Forecast":  89.74
+                       },
+    "roundStats":  {
+                       "player":  15,
+                       "tie":  4,
+                       "banker":  6,
+                       "source":  "computed"
+                   },
+    "winCounts":  [
+                      10,
+                      15,
+                      6
+                  ],
+    "totalRound":  [
+                       {
+                           "id":  1,
+                           "stampTime":  1783757274374,
+                           "showX":  0,
+                           "showY":  0,
+                           "count":  0,
+                           "road":  0,
+                           "win":  true,
+                           "roadFormat":  "B",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  2,
+                           "stampTime":  1783757322049,
+                           "showX":  1,
+                           "showY":  0,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  3,
+                           "stampTime":  1783757365219,
+                           "showX":  1,
+                           "showY":  1,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  4,
+                           "stampTime":  1783757413187,
+                           "showX":  1,
+                           "showY":  2,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  5,
+                           "stampTime":  1783757455843,
+                           "showX":  1,
+                           "showY":  3,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  6,
+                           "stampTime":  1783757503941,
+                           "showX":  1,
+                           "showY":  4,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  7,
+                           "stampTime":  1783757551765,
+                           "showX":  1,
+                           "showY":  5,
+                           "count":  0,
+                           "road":  9,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  8,
+                           "stampTime":  1783757599783,
+                           "showX":  2,
+                           "showY":  5,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  9,
+                           "stampTime":  1783757643688,
+                           "showX":  2,
+                           "showY":  0,
+                           "count":  0,
+                           "road":  0,
+                           "win":  true,
+                           "roadFormat":  "B",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  10,
+                           "stampTime":  1783757731997,
+                           "showX":  3,
+                           "showY":  0,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  11,
+                           "stampTime":  1783757690730,
+                           "showX":  2,
+                           "showY":  0,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  12,
+                           "stampTime":  1783757779017,
+                           "showX":  3,
+                           "showY":  1,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  13,
+                           "stampTime":  1783757821826,
+                           "showX":  4,
+                           "showY":  0,
+                           "count":  0,
+                           "road":  0,
+                           "win":  true,
+                           "roadFormat":  "B",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  14,
+                           "stampTime":  1783757868966,
+                           "showX":  5,
+                           "showY":  0,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  15,
+                           "stampTime":  1783757911264,
+                           "showX":  5,
+                           "showY":  1,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  16,
+                           "stampTime":  1783757957338,
+                           "showX":  5,
+                           "showY":  2,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  17,
+                           "stampTime":  1783758000094,
+                           "showX":  5,
+                           "showY":  3,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  18,
+                           "stampTime":  1783758047206,
+                           "showX":  6,
+                           "showY":  0,
+                           "count":  0,
+                           "road":  0,
+                           "win":  true,
+                           "roadFormat":  "B",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  19,
+                           "stampTime":  1783758093347,
+                           "showX":  6,
+                           "showY":  1,
+                           "count":  0,
+                           "road":  0,
+                           "win":  true,
+                           "roadFormat":  "B",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  20,
+                           "stampTime":  1783758138572,
+                           "showX":  7,
+                           "showY":  0,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  21,
+                           "stampTime":  1783758180342,
+                           "showX":  8,
+                           "showY":  0,
+                           "count":  0,
+                           "road":  2,
+                           "win":  true,
+                           "roadFormat":  "B",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  22,
+                           "stampTime":  1783758221284,
+                           "showX":  8,
+                           "showY":  1,
+                           "count":  0,
+                           "road":  0,
+                           "win":  true,
+                           "roadFormat":  "B",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  23,
+                           "stampTime":  1783758262417,
+                           "showX":  8,
+                           "showY":  1,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  23,
+                           "stampTime":  1783758262417,
+                           "showX":  8,
+                           "showY":  1,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  23,
+                           "stampTime":  1783758262417,
+                           "showX":  8,
+                           "showY":  1,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  23,
+                           "stampTime":  1783758262417,
+                           "showX":  8,
+                           "showY":  1,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  23,
+                           "stampTime":  1783758262417,
+                           "showX":  8,
+                           "showY":  1,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  23,
+                           "stampTime":  1783758262417,
+                           "showX":  8,
+                           "showY":  1,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  23,
+                           "stampTime":  1783758262417,
+                           "showX":  8,
+                           "showY":  1,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  23,
+                           "stampTime":  1783758262417,
+                           "showX":  8,
+                           "showY":  1,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  23,
+                           "stampTime":  1783758262417,
+                           "showX":  8,
+                           "showY":  1,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  24,
+                           "stampTime":  1783758309888,
+                           "showX":  8,
+                           "showY":  2,
+                           "count":  0,
+                           "road":  0,
+                           "win":  true,
+                           "roadFormat":  "B",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  25,
+                           "stampTime":  1783758351592,
+                           "showX":  8,
+                           "showY":  2,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  26,
+                           "stampTime":  1783758392079,
+                           "showX":  8,
+                           "showY":  2,
+                           "count":  2,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  27,
+                           "stampTime":  1783758432873,
+                           "showX":  8,
+                           "showY":  2,
+                           "count":  3,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  28,
+                           "stampTime":  1783758476605,
+                           "showX":  8,
+                           "showY":  3,
+                           "count":  0,
+                           "road":  0,
+                           "win":  true,
+                           "roadFormat":  "B",
+                           "roadRandom":  "P"
+                       },
+                       {
+                           "id":  29,
+                           "stampTime":  1783758520918,
+                           "showX":  8,
+                           "showY":  4,
+                           "count":  0,
+                           "road":  0,
+                           "win":  true,
+                           "roadFormat":  "B",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  30,
+                           "stampTime":  1783758566032,
+                           "showX":  8,
+                           "showY":  4,
+                           "count":  1,
+                           "road":  4,
+                           "win":  true,
+                           "roadFormat":  "T",
+                           "roadRandom":  "B"
+                       },
+                       {
+                           "id":  31,
+                           "stampTime":  1783758613214,
+                           "showX":  9,
+                           "showY":  0,
+                           "count":  0,
+                           "road":  8,
+                           "win":  true,
+                           "roadFormat":  "P",
+                           "roadRandom":  "B"
+                       }
+                   ],
+    "timeCurrent":  1783758649970,
+    "ai0":  {
+                "groupRoad":  {
+                                  "table":  [
+                                                "@{id=1; groupWin=True; countWin=1}",
+                                                "@{id=2; groupWin=False; countWin=0}",
+                                                "@{id=3; groupWin=True; countWin=2}",
+                                                "@{id=4; groupWin=False; countWin=0}",
+                                                "@{id=5; groupWin=True; countWin=2}",
+                                                "@{id=6; groupWin=True; countWin=1}",
+                                                "@{id=7; groupWin=True; countWin=2}",
+                                                "@{id=8; groupWin=True; countWin=2}",
+                                                "@{id=9; groupWin=True; countWin=1}",
+                                                "@{id=10; groupWin=True; countWin=2}",
+                                                "@{id=11; groupWin=True; countWin=1}",
+                                                "@{id=12; groupWin=True; countWin=2}",
+                                                "@{id=13; groupWin=True; countWin=1}"
+                                            ],
+                                  "total":  {
+                                                "group":  13,
+                                                "loss":  2,
+                                                "win":  17
+                                            }
+                              },
+                "percentCurrent":  {
+                                       "Player":  32,
+                                       "Tier":  4,
+                                       "Banker":  64,
+                                       "Round":  "B",
+                                       "Forecast":  89.74
+                                   }
+            },
+    "ai1":  {
+                "groupRoad":  {
+                                  "table":  [
+                                                "@{id=1; groupWin=True; countWin=1}",
+                                                "@{id=2; groupWin=False; countWin=0}",
+                                                "@{id=3; groupWin=True; countWin=2}",
+                                                "@{id=4; groupWin=False; countWin=0}",
+                                                "@{id=5; groupWin=True; countWin=2}",
+                                                "@{id=6; groupWin=True; countWin=1}",
+                                                "@{id=7; groupWin=True; countWin=2}",
+                                                "@{id=8; groupWin=True; countWin=2}",
+                                                "@{id=9; groupWin=True; countWin=1}",
+                                                "@{id=10; groupWin=True; countWin=2}",
+                                                "@{id=11; groupWin=True; countWin=1}",
+                                                "@{id=12; groupWin=True; countWin=2}",
+                                                "@{id=13; groupWin=True; countWin=1}"
+                                            ],
+                                  "total":  {
+                                                "group":  13,
+                                                "loss":  2,
+                                                "win":  17
+                                            }
+                              },
+                "percentCurrent":  {
+                                       "Player":  69,
+                                       "Banker":  11,
+                                       "Tier":  20,
+                                       "Round":  "P",
+                                       "Forecast":  78
+                                   }
+            },
+    "ai2":  {
+                "groupRoad":  {
+                                  "table":  [
+                                                "@{id=1; groupWin=True; countWin=1}",
+                                                "@{id=2; groupWin=False; countWin=0}",
+                                                "@{id=3; groupWin=True; countWin=2}",
+                                                "@{id=4; groupWin=False; countWin=0}",
+                                                "@{id=5; groupWin=True; countWin=2}",
+                                                "@{id=6; groupWin=True; countWin=1}",
+                                                "@{id=7; groupWin=True; countWin=2}",
+                                                "@{id=8; groupWin=True; countWin=2}",
+                                                "@{id=9; groupWin=True; countWin=1}",
+                                                "@{id=10; groupWin=True; countWin=2}",
+                                                "@{id=11; groupWin=True; countWin=1}",
+                                                "@{id=12; groupWin=True; countWin=2}",
+                                                "@{id=13; groupWin=True; countWin=1}"
+                                            ],
+                                  "total":  {
+                                                "group":  13,
+                                                "loss":  2,
+                                                "win":  17
+                                            }
+                              },
+                "percentCurrent":  {
+                                       "Player":  62,
+                                       "Banker":  18,
+                                       "Tier":  20,
+                                       "Round":  "P",
+                                       "Forecast":  72
+                                   }
+            },
+    "ai3":  {
+                "groupRoad":  {
+                                  "table":  [
+                                                "@{id=1; groupWin=True; countWin=1}",
+                                                "@{id=2; groupWin=False; countWin=0}",
+                                                "@{id=3; groupWin=True; countWin=2}",
+                                                "@{id=4; groupWin=False; countWin=0}",
+                                                "@{id=5; groupWin=True; countWin=2}",
+                                                "@{id=6; groupWin=True; countWin=1}",
+                                                "@{id=7; groupWin=True; countWin=2}",
+                                                "@{id=8; groupWin=True; countWin=2}",
+                                                "@{id=9; groupWin=True; countWin=1}",
+                                                "@{id=10; groupWin=True; countWin=2}",
+                                                "@{id=11; groupWin=True; countWin=1}",
+                                                "@{id=12; groupWin=True; countWin=2}",
+                                                "@{id=13; groupWin=True; countWin=1}"
+                                            ],
+                                  "total":  {
+                                                "group":  13,
+                                                "loss":  2,
+                                                "win":  17
+                                            }
+                              },
+                "percentCurrent":  {
+                                       "Player":  47,
+                                       "Banker":  33,
+                                       "Tier":  20,
+                                       "Round":  "P",
+                                       "Forecast":  66
+                                   }
+            },
+    "ai4":  {
+                "groupRoad":  {
+                                  "table":  [
+                                                "@{id=1; groupWin=True; countWin=1}",
+                                                "@{id=2; groupWin=False; countWin=0}",
+                                                "@{id=3; groupWin=True; countWin=2}",
+                                                "@{id=4; groupWin=False; countWin=0}",
+                                                "@{id=5; groupWin=True; countWin=2}",
+                                                "@{id=6; groupWin=True; countWin=1}",
+                                                "@{id=7; groupWin=True; countWin=2}",
+                                                "@{id=8; groupWin=True; countWin=2}",
+                                                "@{id=9; groupWin=True; countWin=1}",
+                                                "@{id=10; groupWin=True; countWin=2}",
+                                                "@{id=11; groupWin=True; countWin=1}",
+                                                "@{id=12; groupWin=True; countWin=2}",
+                                                "@{id=13; groupWin=True; countWin=1}"
+                                            ],
+                                  "total":  {
+                                                "group":  13,
+                                                "loss":  2,
+                                                "win":  17
+                                            }
+                              },
+                "percentCurrent":  {
+                                       "Player":  40,
+                                       "Banker":  41,
+                                       "Tier":  19,
+                                       "Round":  "B",
+                                       "Forecast":  66
+                                   }
+            },
+    "ai5":  {
+                "groupRoad":  {
+                                  "table":  [
+                                                "@{id=1; groupWin=True; countWin=1}",
+                                                "@{id=2; groupWin=False; countWin=0}",
+                                                "@{id=3; groupWin=True; countWin=2}",
+                                                "@{id=4; groupWin=False; countWin=0}",
+                                                "@{id=5; groupWin=True; countWin=2}",
+                                                "@{id=6; groupWin=True; countWin=1}",
+                                                "@{id=7; groupWin=True; countWin=2}",
+                                                "@{id=8; groupWin=True; countWin=2}",
+                                                "@{id=9; groupWin=True; countWin=1}",
+                                                "@{id=10; groupWin=True; countWin=2}",
+                                                "@{id=11; groupWin=True; countWin=1}",
+                                                "@{id=12; groupWin=True; countWin=2}",
+                                                "@{id=13; groupWin=True; countWin=1}"
+                                            ],
+                                  "total":  {
+                                                "group":  13,
+                                                "loss":  2,
+                                                "win":  17
+                                            }
+                              },
+                "percentCurrent":  {
+                                       "Player":  33,
+                                       "Banker":  65,
+                                       "Tier":  2,
+                                       "Round":  "B",
+                                       "Forecast":  98
+                                   }
+            }
+}
