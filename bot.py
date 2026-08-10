@@ -1335,24 +1335,32 @@ async def get_message_content(username):
 
 async def daily_schedule(client, group):
     """
-    Chạy liên tục — chỉ 3 loại tin (userbot PHONE=+84996964621):
-      1) Báo bàn khi Playwright vào bàn (#currentGameTable)
+    Chạy liên tục — 3 loại tin:
+      1) Báo bàn khi Playwright vào bàn
       2) Hô CON / CÁI theo percentCurrent.Round từ API FE
-      3) Gửi ảnh capture ngay khi có B/P/T mới
+      3) Gửi ảnh capture khi có B/P/T mới
+    HO_VIA_BOT=1 → gửi bằng BotFather (không cần OTP userbot).
     """
     try:
-        if not client.is_connected():
-            print("Mất kết nối, đang thử kết nối lại...", flush=True)
-            await client.connect()
-            if not await client.is_user_authorized():
-                await login_client()
-
-        me = await client.get_me()
-        print(
-            f"\n=== BOT TELE LIÊN TỤC | login={me.first_name} phone={phone} "
-            f"| group={group} ===",
-            flush=True,
-        )
+        if TOKEN_BOT and HO_VIA_BOT:
+            print(
+                f"\n=== BOT FATHER HÔ | token_bot=ON | groups={get_broadcast_chat_ids()} ===",
+                flush=True,
+            )
+        else:
+            if client is None:
+                raise RuntimeError('Telethon client None — bat HO_VIA_BOT=1 hoac login PHONE')
+            if not client.is_connected():
+                print("Mất kết nối, đang thử kết nối lại...", flush=True)
+                await client.connect()
+                if not await client.is_user_authorized():
+                    await login_client()
+            me = await client.get_me()
+            print(
+                f"\n=== BOT TELE LIÊN TỤC | login={me.first_name} phone={phone} "
+                f"| group={group} ===",
+                flush=True,
+            )
 
         last_announced_table = None
         round_count = 0
@@ -1821,24 +1829,31 @@ async def schedule_loop(entities):
 
 async def send_now():
     """Chạy 1 vòng hô liên tục; tin hô/ảnh broadcast mọi GROUP qua Bot API (nếu bật)."""
-    telegram_client = get_client()
-    # Entity đầu chỉ dùng fallback userbot / log; Bot API đọc toàn bộ GROUP từ .env
-    entities = await resolve_group_entities(os.getenv('GROUP'))
-    entity = entities[0]
     log(f"[HO TARGETS] Bot API groups={get_broadcast_chat_ids()} | HO_VIA_BOT={HO_VIA_BOT}")
+    entity = None
+    telegram_client = None
+    if TOKEN_BOT and HO_VIA_BOT:
+        entity = get_broadcast_chat_ids()[0] if get_broadcast_chat_ids() else None
+        if entity is None:
+            raise RuntimeError('GROUP rong — them id nhom vao .env')
+    else:
+        telegram_client = get_client()
+        entities = await resolve_group_entities(os.getenv('GROUP'))
+        entity = entities[0]
     while True:
         try:
             await daily_schedule(telegram_client, entity)
         except Exception as e:
             print(f"[LOOP ERROR] {e} — restart sau 5s...", flush=True)
             await asyncio.sleep(5)
-            try:
-                if not telegram_client.is_connected():
-                    await telegram_client.connect()
-                if not await telegram_client.is_user_authorized():
-                    await login_client()
-            except Exception as re:
-                print(f"[RECONNECT WARN] {re}", flush=True)
+            if telegram_client is not None:
+                try:
+                    if not telegram_client.is_connected():
+                        await telegram_client.connect()
+                    if not await telegram_client.is_user_authorized():
+                        await login_client()
+                except Exception as re:
+                    print(f"[RECONNECT WARN] {re}", flush=True)
         await asyncio.sleep(2)
 
 async def list_dialogs():
@@ -1857,35 +1872,45 @@ async def main():
 
     ensure_directories()
     add_rotating_posts_from_directory()
-    log(f"Starting continuous Tele hô | PHONE={phone} | GROUP={group}")
+    log(f"Starting continuous Tele hô | HO_VIA_BOT={HO_VIA_BOT} | GROUP={group}")
 
     try:
+        # BotFather only — không OTP / không Telethon userbot
+        if TOKEN_BOT and HO_VIA_BOT:
+            try:
+                me = bot_api_json('getMe', {})
+                uname = ((me.get('result') or {}).get('username') or '?')
+                log(f"[BOT API] Login OK @{uname} | groups={get_broadcast_chat_ids()}")
+            except Exception as e:
+                log(f"[ERROR] TOKEN_BOT khong hop le / getMe fail: {e}")
+                sys.exit(1)
+            await send_now()
+            return
+
         if not api_id or not api_hash:
-            log("[ERROR] API_ID hoac API_HASH chua duoc cau hinh hop le trong .env")
+            log("[ERROR] API_ID/API_HASH thieu — hoac bat HO_VIA_BOT=1 + TOKEN_BOT")
             sys.exit(1)
 
-        # Tao TelegramClient ben trong running event loop de tranh loi
-        # "Future attached to a different loop" tren Telethon.
         client = TelegramClient(SESSION_NAME, api_id, api_hash)
-        log("Dang ket noi Telegram...")
+        log("Dang ket noi Telegram userbot...")
         await login_client()
         configure_sqlite_session(client)
         me = await client.get_me()
         log(f"Dang nhap: {me.first_name} (@{me.username}) | phone={phone}")
-
         await list_dialogs()
-
         try:
             entities = await resolve_group_entities(os.getenv('GROUP'))
-            log(f'Da lay {len(entities)} entity tu GROUP — chay lien tuc 3 tin (bao ban / ho / anh)')
+            log(f'Da lay {len(entities)} entity tu GROUP')
         except Exception as e:
             log(f"Loi khi lay entity tu .env: {e}")
             return
-
-        # Vòng hô liên tục (không lịch 5 phút)
         await send_now()
     finally:
-        await client.disconnect()
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
         release_lock()
 
 if __name__ == '__main__':
