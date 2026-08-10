@@ -1421,7 +1421,8 @@ async def daily_schedule(client, group):
                 except Exception as e_ann:
                     print(f"[BÁO/ĐỔI BÀN ERROR] {e_ann}", flush=True)
                     try:
-                        group = await resolve_group_entity(os.getenv('GROUP'))
+                        if not (TOKEN_BOT and HO_VIA_BOT):
+                            group = await resolve_group_entity(os.getenv('GROUP'))
                         group = await send_announce_message(group, announce_msg)
                         last_announced_table = target_table
                         print(f"[BÁO BÀN RETRY OK] {log_label}", flush=True)
