@@ -30,8 +30,8 @@ if hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (path cố định — PM2 wrapper có thể đổi cwd)
+load_dotenv(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 
 def log(msg):
