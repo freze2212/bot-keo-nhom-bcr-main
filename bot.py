@@ -2118,9 +2118,6 @@ async def daily_schedule(client, group):
                     road_profile_cache[target_table] = profile
                     latest_at_entry = latest_total_round(table_payload) or {}
                     road_analysis_stamp = latest_at_entry.get('stampTime')
-                    road_msg = format_road_analysis_message(target_table, profile)
-                    if road_msg:
-                        group = await send_announce_message(group, road_msg)
                     print(
                         f"[PHÂN TÍCH CẦU] {target_table} type={profile.get('road_type')} "
                         f"ready={profile.get('ready')} conf={profile.get('confidence')} "
@@ -2167,12 +2164,6 @@ async def daily_schedule(client, group):
                                 f"type={profile.get('road_type')} — yêu cầu đổi bàn",
                                 flush=True,
                             )
-                        try:
-                            road_msg = format_road_analysis_message(target_table, profile)
-                            if road_msg:
-                                group = await send_announce_message(group, road_msg)
-                        except Exception:
-                            pass
                         await asyncio.to_thread(
                             request_change_table_api,
                             target_table,
