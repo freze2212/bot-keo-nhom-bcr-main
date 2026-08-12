@@ -164,6 +164,9 @@ async function isFatalSessionScreenshot(filepath) {
     const pixels = Math.max(1, width * height);
     let dark = 0;
     let pink = 0;
+    let redDark = 0;
+    let centerPink = 0;
+    const pinkByRow = new Array(height).fill(0);
 
     // Lấy mẫu toàn ảnh; bước 2 vẫn đủ chính xác và giảm CPU trên VPS.
     const step = pixels > 800000 ? 2 : 1;
@@ -173,16 +176,43 @@ async function isFatalSessionScreenshot(filepath) {
       const g = data[i + 1];
       const b = data[i + 2];
       if (r < 55 && g < 45 && b < 50) dark += 1;
-      if (r > 95 && r > g * 1.35 && b > 55 && b > g * 1.1) pink += 1;
+      if (g < 55 && r > g * 1.15 && b > g * 1.05) redDark += 1;
+      if (r > 95 && r > g * 1.35 && b > 55 && b > g * 1.1) {
+        pink += 1;
+        const y = Math.floor(p / width);
+        const x = p % width;
+        pinkByRow[y] += 1;
+        if (
+          x > width * 0.15 &&
+          x < width * 0.9 &&
+          y > height * 0.35 &&
+          y < height * 0.65
+        ) {
+          centerPink += 1;
+        }
+      }
     }
 
     const sampled = Math.ceil(pixels / step);
     const darkRatio = dark / sampled;
     const pinkRatio = pink / sampled;
-    const fatal = darkRatio >= 0.82 && pinkRatio >= 0.004;
+    const redDarkRatio = redDark / sampled;
+    const centerPinkRatio = centerPink / sampled;
+    const peakPinkRowRatio = Math.max(...pinkByRow) / Math.max(1, width / step);
+    // Hai dạng overlay thực tế:
+    // 1) crop thấp: nền đen ~93%; 2) full iframe: gradient đỏ khiến dark chỉ ~70%.
+    // Chữ kick luôn là dải hồng dài ở chính giữa ảnh.
+    const fatal =
+      (darkRatio >= 0.65 || redDarkRatio >= 0.8) &&
+      pinkRatio >= 0.004 &&
+      centerPinkRatio >= 0.003 &&
+      peakPinkRowRatio >= 0.15;
     if (fatal) {
       console.error(
-        `[SCREENSHOT FATAL UI] dark=${darkRatio.toFixed(3)} pink=${pinkRatio.toFixed(3)} — SESSION_EXPIRED`
+        `[SCREENSHOT FATAL UI] dark=${darkRatio.toFixed(3)} ` +
+          `redDark=${redDarkRatio.toFixed(3)} pink=${pinkRatio.toFixed(3)} ` +
+          `center=${centerPinkRatio.toFixed(3)} peak=${peakPinkRowRatio.toFixed(3)} ` +
+          "— SESSION_EXPIRED"
       );
     }
     return fatal;

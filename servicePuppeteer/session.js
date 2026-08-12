@@ -864,7 +864,9 @@ let pendingPlaceBetAmount = null;
 let sessionInTableReady = false; // true sau khi notify bàn thật
 let sessionRecovering = false; // overlay lỗi / hết phiên — cấm chụp, đang restart
 let lastPauseAnnounceAt = 0;
+let lastCanvasFatalCheckAt = 0;
 let enterInFlight = null;
+let tableChangeInFlight = false;
 
 async function clearActiveTableOnServer() {
   try {
@@ -931,8 +933,8 @@ async function pickBeautifulTableFromServer(freeCodes) {
 async function goHomeToLobby() {
   try {
     for (const f of [page, seamlessFrame, gameHallFrame, gameCurrentFrame].filter(Boolean)) {
-      const ok = await f
-        .evaluate(() => {
+      const ok = await withTimeout(
+        f.evaluate(() => {
           const el =
             document.querySelector("button#goHome2") ||
             document.querySelector("button#goHome") ||
@@ -942,8 +944,10 @@ async function goHomeToLobby() {
             return true;
           }
           return false;
-        })
-        .catch(() => false);
+        }).catch(() => false),
+        1500,
+        false
+      );
       if (ok) break;
     }
   } catch (_) {}
@@ -1049,7 +1053,9 @@ function startActiveTableHeartbeat() {
       if (!page || page.isClosed()) return;
 
       // Kick / hết phiên → out bàn + restart ngay (không chụp overlay)
-      const fatalUi = await detectFatalUiError().catch(() => null);
+      const fatalUi = await detectFatalUiError({ checkCanvas: true }).catch(
+        () => null
+      );
       if (fatalUi === "SESSION_EXPIRED" || fatalUi === "PAGE_CLOSED") {
         console.log(`❌ [KICK/SESSION] ${fatalUi} — restart ngay`);
         recoverFromFatalUi(fatalUi).catch((e) =>
@@ -1213,10 +1219,40 @@ async function detectConnectionRefreshing() {
   return false;
 }
 
-async function detectFatalUiError() {
+async function detectCanvasSessionExpired(force = false) {
+  const now = Date.now();
+  if (!force && now - lastCanvasFatalCheckAt < 12000) return false;
+  lastCanvasFatalCheckAt = now;
+  if (!page || page.isClosed()) return false;
+  try {
+    const seamlessElement = await page.$("iframe#seamless-game").catch(() => null);
+    const target = seamlessElement || page;
+    const buffer = await withTimeout(
+      target.screenshot(
+        seamlessElement
+          ? { timeout: 4500 }
+          : { fullPage: false, timeout: 4500 }
+      ),
+      5000,
+      null
+    );
+    if (!buffer) return false;
+    return screenshotHelper.isFatalSessionScreenshot(buffer);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function detectFatalUiError(options = {}) {
   if (!page || page.isClosed()) return "PAGE_CLOSED";
   const expired = await detectSessionExpired().catch(() => false);
   if (expired) return "SESSION_EXPIRED";
+  if (options.checkCanvas) {
+    const canvasExpired = await detectCanvasSessionExpired(
+      !!options.forceCanvas
+    ).catch(() => false);
+    if (canvasExpired) return "SESSION_EXPIRED";
+  }
   return null;
 }
 
@@ -2639,9 +2675,9 @@ let captureLockTimeout = null;
 
 // Chụp ảnh màn hình bàn cược
 async function captureTableRound(tableName, roundOptions = {}) {
-  if (sessionRecovering || resetInFlight) {
-    console.log(`[SCREENSHOT SKIP] đang recover — không chụp ${tableName}`);
-    return { success: false, reason: "RECOVERING" };
+  if (sessionRecovering || resetInFlight || tableChangeInFlight) {
+    console.log(`[SCREENSHOT SKIP] đang recover/đổi bàn — không chụp ${tableName}`);
+    return { success: false, reason: "RECOVERING_OR_CHANGING_TABLE" };
   }
   // Nếu đang chụp — chờ lock tối đa 6s rồi mới bỏ (tránh bot nhận ảnh ảo)
   if (isCapturingScreenshot) {
@@ -2888,6 +2924,22 @@ socket.on("request_change_table", async (data) => {
     ? String(data.nameService).trim().toUpperCase()
     : null;
   if (targetNs && targetNs !== nameServiceSocket) return;
+  if (tableChangeInFlight) {
+    console.log(`[CHANGE TABLE] ${nameServiceSocket} đang đổi bàn — bỏ lệnh trùng`);
+    return;
+  }
+  tableChangeInFlight = true;
+  const fatalUi = await detectFatalUiError({
+    checkCanvas: true,
+    forceCanvas: true,
+  }).catch(() => null);
+  if (fatalUi === "SESSION_EXPIRED" || fatalUi === "PAGE_CLOSED") {
+    tableChangeInFlight = false;
+    recoverFromFatalUi(fatalUi).catch((e) =>
+      console.error("[RECOVER]", e.message)
+    );
+    return;
+  }
   const reason = data?.reason || "cầu xấu";
   const fromTable = data?.tableName
     ? String(data.tableName).trim().toUpperCase()
@@ -2895,6 +2947,12 @@ socket.on("request_change_table", async (data) => {
   console.log(
     `[CHANGE TABLE] ${nameServiceSocket} out ${fromTable || "?"} — ${reason}`
   );
+  // Chặn ngay capture/place-bet của bàn cũ trước mọi thao tác DOM có thể bị treo.
+  sessionInTableReady = false;
+  currentInTable = null;
+  pendingPlaceBetSide = null;
+  pendingPlaceBetAmount = null;
+  await clearActiveTableOnServer().catch(() => {});
   await helper.appendToLog(
     `🔄 [ĐỔI BÀN] Out ${fromTable || "?"} vì ${reason} — chọn bàn cầu đẹp khác`,
     logsNameProgress
@@ -2906,6 +2964,8 @@ socket.on("request_change_table", async (data) => {
     );
   } catch (e) {
     console.error("[CHANGE TABLE ERROR]", e.message);
+  } finally {
+    tableChangeInFlight = false;
   }
 });
 
@@ -2955,6 +3015,12 @@ socket.on("new_round_completed", async (data) => {
 });
 
 async function runPlaceBetCommand(betSide, betAmount) {
+  if (tableChangeInFlight || sessionRecovering || resetInFlight) {
+    pendingPlaceBetSide = null;
+    pendingPlaceBetAmount = null;
+    console.log("[SOCKET PLACE BET SKIP] đang đổi bàn/recover — bỏ lệnh bàn cũ");
+    return;
+  }
   if (
     !sessionInTableReady ||
     !currentInTable ||
