@@ -206,9 +206,38 @@ async function listTablesFromFrame(frame, { scrolls = 4 } = {}) {
 
 async function clickTableByCode(frame, tableCode, { allowFallback = false } = {}) {
   if (!frame) return { ok: false, table: null, via: "no_frame" };
+  const prefer = normTableCode(tableCode);
+  // Virtual scroller chỉ render các card đang nhìn thấy. Cuộn toàn sảnh để
+  // click đúng bàn đã được server xếp hạng, không fallback sang bàn ngẫu nhiên.
+  for (let i = 0; i < 14; i++) {
+    const result = await frame
+      .evaluate(clickTableByCodeEval, { prefer, allowFallback: false })
+      .catch(() => ({ ok: false, table: null }));
+    if (result?.ok) return result;
+    await frame
+      .evaluate(() => {
+        const scroller =
+          document.querySelector(".vue-recycle-scroller") ||
+          document.querySelector("[class*='recycle']") ||
+          document.scrollingElement;
+        if (scroller) scroller.scrollTop = (scroller.scrollTop || 0) + 400;
+      })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  await frame
+    .evaluate(() => {
+      const scroller =
+        document.querySelector(".vue-recycle-scroller") ||
+        document.querySelector("[class*='recycle']") ||
+        document.scrollingElement;
+      if (scroller) scroller.scrollTop = 0;
+    })
+    .catch(() => {});
+  if (!allowFallback) return { ok: false, table: null, via: "not_found" };
   return frame.evaluate(clickTableByCodeEval, {
-    prefer: normTableCode(tableCode),
-    allowFallback,
+    prefer,
+    allowFallback: true,
   });
 }
 

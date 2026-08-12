@@ -4,8 +4,8 @@
  */
 
 const ROAD_ANALYSIS_WINDOW = Number(process.env.ROAD_ANALYSIS_WINDOW) || 20;
-const ROAD_ANALYSIS_MIN_BP = Number(process.env.ROAD_ANALYSIS_MIN_BP) || 18;
-const ROAD_ANALYSIS_MIN_CONF = Number(process.env.ROAD_ANALYSIS_MIN_CONF) || 0.65;
+const ROAD_ANALYSIS_MIN_BP = Number(process.env.ROAD_ANALYSIS_MIN_BP) || 20;
+const ROAD_ANALYSIS_MIN_CONF = Number(process.env.ROAD_ANALYSIS_MIN_CONF) || 0.72;
 
 function roadToSide(roadOrFormat) {
   if (roadOrFormat === "B" || roadOrFormat === "P" || roadOrFormat === "T") {

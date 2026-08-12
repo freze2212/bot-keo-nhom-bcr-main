@@ -2216,7 +2216,7 @@ async function enterTargetTable(gameHallFrame, tableName, isRetry = false) {
     const pickOffset = Math.max(0, accountIdx - 1);
 
     if (gameHallFrame) {
-      let listedOnce = await listTablesFromFrame(gameHallFrame, { scrolls: 4 }).catch(
+      let listedOnce = await listTablesFromFrame(gameHallFrame, { scrolls: 12 }).catch(
         () => []
       );
 
@@ -2236,7 +2236,7 @@ async function enterTargetTable(gameHallFrame, tableName, isRetry = false) {
 
         // Refresh list DOM mỗi vài lần — bàn mới mở / đủ tay
         if (attempt > 0 && attempt % 4 === 0) {
-          const relisted = await listTablesFromFrame(gameHallFrame, { scrolls: 4 }).catch(
+          const relisted = await listTablesFromFrame(gameHallFrame, { scrolls: 12 }).catch(
             () => []
           );
           if (relisted.length) listedOnce = relisted;
@@ -2359,6 +2359,14 @@ async function enterTargetTable(gameHallFrame, tableName, isRetry = false) {
         "[ENTER] hết attempt — chưa click được bàn cầu đẹp (không fallback random)"
       );
       await clearActiveTableOnServer().catch(() => {});
+      // Không đứng chết ở lobby: tiếp tục quét toàn bộ bàn cho đến khi có cầu đẹp.
+      setTimeout(() => {
+        if (!currentInTable && !sessionRecovering && !resetInFlight) {
+          enterTargetTable(gameHallFrame || seamlessFrame || page, null).catch(
+            (e) => console.error("[RESCAN BEAUTIFUL TABLE]", e.message)
+          );
+        }
+      }, 5000);
       return { success: false, reason: "no_beautiful_table" };
     }
 

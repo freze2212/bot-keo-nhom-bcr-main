@@ -1813,8 +1813,8 @@ BET_AMOUNT = float(os.getenv('BET_AMOUNT', '50') or '50')
 UNIT_DISPLAY = int(float(os.getenv('UNIT_DISPLAY', '1000') or '1000'))
 MARTINGALE_MULTIPLIERS = (1, 2, 4)
 ROAD_ANALYSIS_WINDOW = int(os.getenv('ROAD_ANALYSIS_WINDOW', '20') or '20')
-ROAD_ANALYSIS_MIN_BP = int(os.getenv('ROAD_ANALYSIS_MIN_BP', '18') or '18')
-ROAD_ANALYSIS_MIN_CONF = float(os.getenv('ROAD_ANALYSIS_MIN_CONF', '0.65') or '0.65')
+ROAD_ANALYSIS_MIN_BP = int(os.getenv('ROAD_ANALYSIS_MIN_BP', '20') or '20')
+ROAD_ANALYSIS_MIN_CONF = float(os.getenv('ROAD_ANALYSIS_MIN_CONF', '0.72') or '0.72')
 TELE_LINE = '--------»-----★--—-«--------'
 UNSTABLE_ROAD_MESSAGE = (
     '⚠️ <b>CẦU CHƯA ỔN ĐỊNH</b>\n'
@@ -2154,14 +2154,14 @@ async def daily_schedule(client, group):
                 profile = analyze_road_profile(before_payload)
                 road_profile_cache[target_table] = profile
                 if not profile.get('ready'):
-                    bad_type = profile.get('road_type') in ('CHOP', 'NOISE')
                     enough_hands = int(profile.get('hand_count') or 0) >= ROAD_ANALYSIS_MIN_BP
-                    if bad_type and enough_hands:
+                    if enough_hands:
                         if time.time() - last_road_log_at >= 8:
                             last_road_log_at = time.time()
                             print(
-                                f"[PHÂN TÍCH CẦU] {target_table} cầu xấu "
-                                f"type={profile.get('road_type')} — yêu cầu đổi bàn",
+                                f"[PHÂN TÍCH CẦU] {target_table} không đạt chuẩn "
+                                f"type={profile.get('road_type')} "
+                                f"conf={profile.get('confidence')} — đổi ngay sang bàn tốt hơn",
                                 flush=True,
                             )
                         await asyncio.to_thread(
