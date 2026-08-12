@@ -997,7 +997,7 @@ async function reserveTableOnServer(tableName) {
   }
 }
 
-async function notifyActiveTableToServer(tableName) {
+async function notifyActiveTableToServer(tableName, meta = {}) {
   const key = String(tableName || "").trim().toUpperCase();
   if (!key || key === "NONE" || key === "LOBBY") return false;
   const shouldLogReady = !sessionInTableReady;
@@ -1007,13 +1007,17 @@ async function notifyActiveTableToServer(tableName) {
     await axios.post(`http://localhost:${serverPort}/api/notify-active-table`, {
       tableName: key,
       nameService: nameServiceSocket,
+      roadQuality: meta.roadQuality || null,
+      roadProfile: meta.roadProfile || null,
     });
     sessionInTableReady = true;
     sessionRecovering = false;
     if (shouldLogReady) {
-      console.log(`✅ [API NOTIFY] active_table=${key} → bot có thể hô`);
+      console.log(
+        `✅ [API NOTIFY] active_table=${key} quality=${meta.roadQuality || "?"} → bot có thể hô`
+      );
       await helper.appendToLog(
-        `✅ [API NOTIFY] Đã vào bàn → báo bot hô: active_table=${key}`,
+        `✅ [API NOTIFY] Đã vào bàn → báo bot hô: active_table=${key} quality=${meta.roadQuality || "?"}`,
         logsNameProgress
       );
     }
@@ -2278,6 +2282,8 @@ async function enterTargetTable(gameHallFrame, tableName) {
     }
 
     let clickedTableCode = null;
+    let enterRoadQuality = null;
+    let enterRoadProfile = null;
     // NS1 ưu tiên free[0], NS2 free[1]… — tránh 2 session cùng dãy C03→C04
     const pickOffset = Math.max(0, accountIdx - 1);
 
@@ -2286,9 +2292,9 @@ async function enterTargetTable(gameHallFrame, tableName) {
         () => []
       );
 
-      // Thử lại tối đa 20 lần: đóng popup → chỉ click bàn cầu đẹp
+      // Thử lại tối đa 20 lần: ưu tiên cầu đẹp; không có thì random free
       for (let attempt = 0; attempt < 20; attempt++) {
-        console.log(`[ENTER] attempt ${attempt + 1}/20 — đóng popup rồi mới click bàn cầu đẹp`);
+        console.log(`[ENTER] attempt ${attempt + 1}/20 — đóng popup rồi mới click bàn`);
         await dismissBrowserSupportModal().catch(() => {});
         await helper.delay(300);
         await dismissBrowserSupportModal().catch(() => {});
@@ -2317,23 +2323,36 @@ async function enterTargetTable(gameHallFrame, tableName) {
           `[ENTER] DOM list=${listedOnce.length} free=${freeCodes.slice(0, 10).join(",") || "-"} occupied=${occupied.join(",") || "-"} offset=${pickOffset}`
         );
 
-        // Ưu tiên bàn chỉ định; không thì chỉ vào bàn cầu đẹp (≥20 tay, conf đủ)
+        // Ưu tiên bàn chỉ định; không thì cầu đẹp → không có thì random
         let prefer = null;
+        enterRoadQuality = null;
+        enterRoadProfile = null;
         if (tableName && String(tableName).trim()) {
           const forced = normTableCode(tableName);
-          if (forced) prefer = forced;
+          if (forced) {
+            prefer = forced;
+            enterRoadQuality = "beautiful";
+          }
         } else {
           const pick = await pickBeautifulTableFromServer(freeCodes);
           prefer = pick.tableName || null;
           if (prefer) {
+            enterRoadQuality = "beautiful";
+            enterRoadProfile = pick.profile || null;
             console.log(
               `[ENTER] cầu đẹp → ${prefer} type=${pick.profile?.roadType} ` +
                 `conf=${pick.profile?.confidence} seq=${pick.profile?.seqDisplay || "-"}`
             );
-          } else {
+          } else if (freeCodes.length) {
+            const idx = Math.min(pickOffset, freeCodes.length - 1);
+            const rotated = freeCodes.slice(idx).concat(freeCodes.slice(0, idx));
+            prefer = rotated[attempt % rotated.length];
+            enterRoadQuality = "random";
             console.log(
-              `[ENTER] chưa có bàn cầu đẹp — chờ quét lại (${pick.message || "—"})`
+              `[ENTER] không có cầu đẹp — random ${prefer} (attempt ${attempt + 1})`
             );
+          } else {
+            console.log(`[ENTER] không còn bàn free — chờ quét lại`);
             await helper.delay(1500);
             continue;
           }
@@ -2360,12 +2379,12 @@ async function enterTargetTable(gameHallFrame, tableName) {
         let tableClicked = { ok: false, table: null };
         if (prefer) {
           tableClicked = await clickTableByCode(gameHallFrame, prefer, {
-            allowFallback: false,
+            allowFallback: enterRoadQuality === "random",
           }).catch(() => ({ ok: false }));
         }
-        // Không fallback random bàn xấu — chỉ vào bàn cầu đẹp đã chọn
         if (!tableClicked?.ok) {
-          console.log(`[ENTER] click ${prefer || "?"} thất bại — thử bàn cầu đẹp khác`);
+          console.log(`[ENTER] click ${prefer || "?"} thất bại — thử bàn khác`);
+          await clearActiveTableOnServer().catch(() => {});
           await helper.delay(800);
           continue;
         }
@@ -2376,10 +2395,10 @@ async function enterTargetTable(gameHallFrame, tableName) {
             ? normTableCode(tableClicked.table)
             : prefer;
           await helper.appendToLog(
-            `✅ [CLICK TABLE SUCCESS] click card ${clickedTableCode || "?"} (lần ${attempt + 1})!`,
+            `✅ [CLICK TABLE SUCCESS] click card ${clickedTableCode || "?"} (${enterRoadQuality || "?"}, lần ${attempt + 1})!`,
             logsNameProgress
           );
-          console.log(`✅ [CLICK TABLE] ${clickedTableCode || "?"}`);
+          console.log(`✅ [CLICK TABLE] ${clickedTableCode || "?"} quality=${enterRoadQuality || "?"}`);
 
           // Chờ vào phòng thật
           await helper.delay(5000);
@@ -2422,18 +2441,17 @@ async function enterTargetTable(gameHallFrame, tableName) {
 
     if (!clickedSuccess && gameHallFrame) {
       console.log(
-        "[ENTER] hết attempt — chưa click được bàn cầu đẹp (không fallback random)"
+        "[ENTER] hết attempt — chưa vào được bàn, sẽ quét lại sau 5s"
       );
       await clearActiveTableOnServer().catch(() => {});
-      // Không đứng chết ở lobby: tiếp tục quét toàn bộ bàn cho đến khi có cầu đẹp.
       setTimeout(() => {
         if (!currentInTable && !sessionRecovering && !resetInFlight) {
           enterTargetTable(gameHallFrame || seamlessFrame || page, null).catch(
-            (e) => console.error("[RESCAN BEAUTIFUL TABLE]", e.message)
+            (e) => console.error("[RESCAN TABLE]", e.message)
           );
         }
       }, 5000);
-      return { success: false, reason: "no_beautiful_table" };
+      return { success: false, reason: "enter_failed" };
     }
 
     // Chờ vào bàn + đọc mã — chỉ notify khi đã vào phòng thật
@@ -2476,7 +2494,10 @@ async function enterTargetTable(gameHallFrame, tableName) {
       `🎯 [ĐANG Ở CHÍNH XÁC BÀN]: ${finalTable}! Gửi thông báo cho Bot Telegram!`,
       logsNameProgress
     );
-    const notified = await notifyActiveTableToServer(finalTable);
+    const notified = await notifyActiveTableToServer(finalTable, {
+      roadQuality: enterRoadQuality || "random",
+      roadProfile: enterRoadProfile || null,
+    });
     if (notified && typeof notified === "object" && notified.conflict) {
       console.log(
         `[CONFLICT] ${finalTable} trùng ${notified.occupiedBy} — goHome rồi chọn bàn khác`
@@ -2996,8 +3017,11 @@ socket.on("request_change_table", async (data) => {
   const fromTable = data?.tableName
     ? String(data.tableName).trim().toUpperCase()
     : currentInTable;
+  const forcedTarget = data?.targetTable
+    ? String(data.targetTable).trim().toUpperCase()
+    : null;
   console.log(
-    `[CHANGE TABLE] ${nameServiceSocket} out ${fromTable || "?"} — ${reason}`
+    `[CHANGE TABLE] ${nameServiceSocket} out ${fromTable || "?"} → ${forcedTarget || "auto"} — ${reason}`
   );
   // Chặn ngay capture/place-bet của bàn cũ trước mọi thao tác DOM có thể bị treo.
   sessionInTableReady = false;
@@ -3006,14 +3030,15 @@ socket.on("request_change_table", async (data) => {
   pendingPlaceBetAmount = null;
   await clearActiveTableOnServer().catch(() => {});
   await helper.appendToLog(
-    `🔄 [ĐỔI BÀN] Out ${fromTable || "?"} vì ${reason} — chọn bàn cầu đẹp khác`,
+    `🔄 [ĐỔI BÀN] Out ${fromTable || "?"} vì ${reason} — ${forcedTarget ? `vào ${forcedTarget}` : "ưu tiên cầu đẹp / random"}`,
     logsNameProgress
   );
   try {
     await goHomeToLobby();
-    await enterTargetTable(gameHallFrame || seamlessFrame || page, null).catch(
-      (e) => console.error("[CHANGE TABLE ENTER]", e.message)
-    );
+    await enterTargetTable(
+      gameHallFrame || seamlessFrame || page,
+      forcedTarget || null
+    ).catch((e) => console.error("[CHANGE TABLE ENTER]", e.message));
   } catch (e) {
     console.error("[CHANGE TABLE ERROR]", e.message);
   } finally {

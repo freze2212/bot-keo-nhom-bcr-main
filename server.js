@@ -49,9 +49,10 @@ const latestScreenshots = {};
 const systemPauseByNs = {};
 const lastPauseTelegramAt = {};
 const SYSTEM_PAUSE_MSG =
-  "⏳ <b>HỆ THỐNG ĐANG PHÂN TÍCH CẦU</b>\n" +
-  "Vui lòng chờ tín hiệu kế tiếp... 🔮\n" +
+  "⚠️ <b>PHIÊN GAME BỊ NGẮT</b>\n" +
+  "Hệ thống đang kết nối lại — vui lòng chờ...\n" +
   "--------»-----★--—-«--------";
+const SYSTEM_PAUSE_TELEGRAM_MS = 5 * 60 * 1000;
 
 const io = socketIO(server, {
   cors: {
@@ -112,9 +113,22 @@ async function announceSystemPause(ns, reason) {
   const now = Date.now();
   systemPauseByNs[key] = { at: now, reason: reason || "recover" };
   try {
-    setActiveTable("NONE", key);
+    setActiveTable("CLEAR", key);
   } catch (_) {}
-  if (lastPauseTelegramAt[key] && now - lastPauseTelegramAt[key] < 90000) {
+  // Chỉ báo Telegram khi đá session / hết phiên — không spam tin "phân tích cầu".
+  const reasonKey = String(reason || "").toUpperCase();
+  const shouldTelegram =
+    reasonKey.includes("SESSION") ||
+    reasonKey.includes("KICK") ||
+    reasonKey.includes("LOGIN");
+  if (!shouldTelegram) {
+    console.log(`[SYSTEM PAUSE] ${key} no-telegram reason=${reason}`);
+    return { sent: false, cooldown: false };
+  }
+  if (
+    lastPauseTelegramAt[key] &&
+    now - lastPauseTelegramAt[key] < SYSTEM_PAUSE_TELEGRAM_MS
+  ) {
     console.log(`[SYSTEM PAUSE] ${key} skip telegram cooldown reason=${reason}`);
     return { sent: false, cooldown: true };
   }
@@ -153,10 +167,11 @@ app.post("/api/ingest-hall-data", async (req, res) => {
   }
 });
 
-function setActiveTable(tableName, nameService) {
+function setActiveTable(tableName, nameService, meta = {}) {
   if (!tableName) return null;
   const key = String(tableName).trim().toUpperCase();
   const ns = String(nameService || "NS1").trim().toUpperCase() || "NS1";
+  const infoMeta = meta && typeof meta === "object" ? meta : {};
   if (key === "NONE" || key === "LOBBY" || key === "CLEAR") {
     if (!activeTablesByNs[ns] && !reservedTablesByNs[ns]) return null;
     delete activeTablesByNs[ns];
@@ -187,6 +202,12 @@ function setActiveTable(tableName, nameService) {
   // Heartbeat cùng bàn: giữ nguyên readyAt, không ghi log/emit lại.
   if (activeTablesByNs[ns]?.tableName === key) {
     delete reservedTablesByNs[ns];
+    if (infoMeta.roadQuality || infoMeta.roadProfile) {
+      activeTablesByNs[ns].roadQuality =
+        infoMeta.roadQuality || activeTablesByNs[ns].roadQuality || null;
+      activeTablesByNs[ns].roadProfile =
+        infoMeta.roadProfile || activeTablesByNs[ns].roadProfile || null;
+    }
     return key;
   }
 
@@ -202,18 +223,27 @@ function setActiveTable(tableName, nameService) {
   }
 
   delete reservedTablesByNs[ns];
-  activeTablesByNs[ns] = { tableName: key, readyAt: Date.now() };
+  activeTablesByNs[ns] = {
+    tableName: key,
+    readyAt: Date.now(),
+    roadQuality: infoMeta.roadQuality || null,
+    roadProfile: infoMeta.roadProfile || null,
+  };
   delete systemPauseByNs[ns];
   currentTargetTable = key;
   activeTableReadyAt = Date.now();
   console.log(`\n==================================================`);
-  console.log(`🎯 ACTIVE TABLE READY: ${key} (${ns}) @ ${activeTableReadyAt}`);
+  console.log(
+    `🎯 ACTIVE TABLE READY: ${key} (${ns}) quality=${infoMeta.roadQuality || "?"} @ ${activeTableReadyAt}`
+  );
   console.log(`   occupied: ${JSON.stringify(occupiedTablesList())}`);
   console.log(`==================================================\n`);
   io.emit("active_table_updated", {
     tableName: key,
     nameService: ns,
     readyAt: activeTableReadyAt,
+    roadQuality: infoMeta.roadQuality || null,
+    roadProfile: infoMeta.roadProfile || null,
     occupied: occupiedTablesList(),
   });
   return key;
@@ -251,15 +281,19 @@ app.post("/api/set-target-table", (req, res) => {
 });
 
 app.post("/api/notify-active-table", async (req, res) => {
-  const { tableName, nameService } = req.body || {};
+  const { tableName, nameService, roadQuality, roadProfile } = req.body || {};
   if (!tableName) {
     return res.status(400).json({ success: false, message: "Missing tableName" });
   }
   try {
-    const key = setActiveTable(tableName, nameService);
+    const key = setActiveTable(tableName, nameService, {
+      roadQuality: roadQuality || null,
+      roadProfile: roadProfile || null,
+    });
     return res.json({
       success: true,
       activeTable: key,
+      roadQuality: roadQuality || null,
       occupied: occupiedTablesList(),
     });
   } catch (e) {
@@ -288,18 +322,28 @@ app.get("/api/occupied-tables", (req, res) => {
   });
 });
 
-/** Chọn bàn cầu đẹp (≥20 tay, không chop/noise) trong danh sách freeCodes. */
+/** Chọn bàn cầu đẹp (≥20 tay, không chop/noise) trong danh sách freeCodes.
+ *  freeCodes rỗng → quét toàn bộ bàn trong DB (trừ occupied). */
 app.post("/api/pick-beautiful-table", async (req, res) => {
   try {
-    const freeCodes = Array.isArray(req.body?.freeCodes)
-      ? req.body.freeCodes
-          .map((c) => String(c || "").trim().toUpperCase())
-          .filter(Boolean)
-      : [];
     const ns = String(req.body?.nameService || "").trim().toUpperCase() || null;
     const occupied = new Set(
       occupiedTablesList(ns).map((x) => String(x.tableName).toUpperCase())
     );
+    let freeCodes = Array.isArray(req.body?.freeCodes)
+      ? req.body.freeCodes
+          .map((c) => String(c || "").trim().toUpperCase())
+          .filter(Boolean)
+      : [];
+    if (!freeCodes.length) {
+      const allDocs = await predictResultSchema
+        .find({})
+        .select("tableName -_id")
+        .lean();
+      freeCodes = (allDocs || [])
+        .map((d) => String(d.tableName || "").trim().toUpperCase())
+        .filter((c) => c && !occupied.has(c));
+    }
     const candidates = freeCodes.filter((c) => !occupied.has(c));
     if (!candidates.length) {
       return res.json({
@@ -374,20 +418,31 @@ app.post("/api/pick-beautiful-table", async (req, res) => {
   }
 });
 
-/** Bot yêu cầu session out bàn xấu → chọn bàn cầu đẹp khác. */
+/** Bot yêu cầu session out bàn xấu → ưu tiên bàn cầu đẹp chỉ định, không thì random. */
 app.post("/api/request-change-table", (req, res) => {
   const ns = String(req.body?.nameService || "").trim().toUpperCase() || "NS1";
   const reason = String(req.body?.reason || "cầu xấu").trim();
   const fromTable = String(req.body?.tableName || "").trim().toUpperCase() || null;
-  console.log(`[CHANGE TABLE] ${ns} từ ${fromTable || "?"} — ${reason}`);
+  const targetTable =
+    String(req.body?.targetTable || "").trim().toUpperCase() || null;
+  console.log(
+    `[CHANGE TABLE] ${ns} từ ${fromTable || "?"} → ${targetTable || "auto"} — ${reason}`
+  );
   // Chặn bot tiếp tục hô/báo lại bàn cũ trong lúc browser đang thao tác out bàn.
   setActiveTable("CLEAR", ns);
   io.emit("request_change_table", {
     nameService: ns,
     tableName: fromTable,
+    targetTable,
     reason,
   });
-  return res.json({ success: true, nameService: ns, tableName: fromTable, reason });
+  return res.json({
+    success: true,
+    nameService: ns,
+    tableName: fromTable,
+    targetTable,
+    reason,
+  });
 });
 
 app.get("/api/get-active-table", (req, res) => {
@@ -399,10 +454,13 @@ app.get("/api/get-active-table", (req, res) => {
   }
   if (ns && activeTablesByNs[ns]) {
     delete systemPauseByNs[ns];
+    const info = activeTablesByNs[ns];
     return res.json({
       success: true,
-      activeTable: activeTablesByNs[ns].tableName,
-      readyAt: activeTablesByNs[ns].readyAt,
+      activeTable: info.tableName,
+      readyAt: info.readyAt,
+      roadQuality: info.roadQuality || null,
+      roadProfile: info.roadProfile || null,
       nameService: ns,
       occupied: occupiedTablesList(),
     });
@@ -415,7 +473,7 @@ app.get("/api/get-active-table", (req, res) => {
       readyAt: null,
       nameService: ns,
       occupied: occupiedTablesList(),
-      message: "Hệ thống đang phân tích cầu kèo",
+      message: "Hệ thống đang kết nối lại phiên game",
     });
   }
   if (ns) {

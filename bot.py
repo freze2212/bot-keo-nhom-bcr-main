@@ -699,8 +699,8 @@ def set_target_table_api(table_name):
         return None
 
 
-def request_change_table_api(table_name=None, reason='cầu xấu'):
-    """Yêu cầu session out bàn xấu → chọn bàn cầu đẹp khác."""
+def request_change_table_api(table_name=None, reason='cầu xấu', target_table=None):
+    """Yêu cầu session out bàn xấu → ưu tiên target cầu đẹp, không thì random."""
     try:
         body = {
             'nameService': get_name_service(),
@@ -708,15 +708,91 @@ def request_change_table_api(table_name=None, reason='cầu xấu'):
         }
         if table_name:
             body['tableName'] = str(table_name).strip().upper()
+        if target_table:
+            body['targetTable'] = str(target_table).strip().upper()
         res_data = api_post_json('/api/request-change-table', body, timeout=5)
         print(
-            f"[API ĐỔI BÀN] {body.get('tableName') or '?'} — {reason} -> {res_data}",
+            f"[API ĐỔI BÀN] {body.get('tableName') or '?'} → "
+            f"{body.get('targetTable') or 'auto'} — {reason} -> {res_data}",
             flush=True,
         )
         return res_data
     except Exception as e:
         print(f"[API ĐỔI BÀN ERROR] {e}", flush=True)
         return None
+
+
+def pick_beautiful_table_api(free_codes=None):
+    """Hỏi server bàn cầu đẹp (free_codes rỗng = quét toàn DB trừ occupied)."""
+    try:
+        body = {
+            'nameService': get_name_service(),
+            'freeCodes': list(free_codes or []),
+        }
+        res_data = api_post_json('/api/pick-beautiful-table', body, timeout=8)
+        if res_data.get('success') and res_data.get('tableName'):
+            return {
+                'tableName': str(res_data['tableName']).strip().upper(),
+                'profile': res_data.get('profile') or {},
+            }
+        return None
+    except Exception as e:
+        print(f"[API PICK BEAUTIFUL ERROR] {e}", flush=True)
+        return None
+
+
+def format_beautiful_table_announce(table_name, profile=None, from_table=None):
+    """Tin Telegram khi phát hiện / vào bàn cầu đẹp."""
+    table = str(table_name or '').strip().upper() or '?'
+    profile = profile if isinstance(profile, dict) else {}
+    road_type = (
+        profile.get('road_type')
+        or profile.get('roadType')
+        or '?'
+    )
+    type_labels = {
+        'BET': 'BỆT',
+        'RHYTHM': 'NHỊP',
+        'TWO_TWO': '2-2',
+        'BIAS': 'LỆCH',
+        'PATTERN': 'PATTERN',
+    }
+    type_label = type_labels.get(str(road_type).upper(), str(road_type).upper())
+    side = profile.get('side')
+    side_label = 'CÁI' if side == 'B' else ('CON' if side == 'P' else '—')
+    try:
+        conf = float(profile.get('confidence') or 0) * 100
+    except (TypeError, ValueError):
+        conf = 0.0
+    trend = profile.get('trend') or profile.get('reason') or ''
+    lines = [
+        f"✨ <b>PHÁT HIỆN CẦU ĐẸP — BÀN {table}</b>",
+        f"Loại: <b>{type_label}</b> | Xu hướng: <b>{side_label}</b> ({conf:.0f}%)",
+    ]
+    if trend:
+        lines.append(str(trend)[:120])
+    if from_table and str(from_table).upper() != table:
+        lines.append(f"Đổi từ {from_table} → <b>{table}</b>")
+    else:
+        lines.append(f"AE vào đúng bàn <b>{table}</b> theo lệnh.")
+    lines.append(TELE_LINE)
+    return '\n'.join(lines)
+
+
+def format_random_table_announce(table_name, from_table=None):
+    """Tin ngắn khi vào bàn random (không có cầu đẹp)."""
+    table = str(table_name or '').strip().upper() or '?'
+    if from_table and str(from_table).upper() != table:
+        return (
+            f"🔄 <b>ĐỔI BÀN: {from_table} → {table}</b>\n"
+            f"Chưa có cầu đẹp — tạm theo bàn <b>{table}</b>.\n"
+            f"{TELE_LINE}"
+        )
+    return (
+        f"🎰 <b>VÀO BÀN: {table}</b>\n"
+        f"Chưa có cầu đẹp — tạm theo bàn <b>{table}</b>.\n"
+        f"{TELE_LINE}"
+    )
 
 
 async def get_real_screenshot_data_async(
@@ -829,7 +905,7 @@ def get_active_table_api():
             if now - last_log >= 10:
                 globals()['_last_pause_log_at'] = now
                 print(
-                    "[WAIT BÀN] Hệ thống đang phân tích cầu kèo — chờ session restart",
+                    "[WAIT BÀN] Hệ thống đang kết nối lại phiên game — chờ session",
                     flush=True,
                 )
             globals()['_system_paused'] = True
@@ -839,8 +915,12 @@ def get_active_table_api():
             table = str(res_data['activeTable']).upper().strip()
             if table and table not in ('NONE', 'LOBBY'):
                 ready_at = res_data.get('readyAt')
-                # Không có readyAt (server cũ) vẫn chấp nhận
-                return {'table': table, 'readyAt': ready_at}
+                return {
+                    'table': table,
+                    'readyAt': ready_at,
+                    'roadQuality': res_data.get('roadQuality'),
+                    'roadProfile': res_data.get('roadProfile'),
+                }
         else:
             now = time.time()
             last_log = globals().get('_last_wait_ban_log_at', 0)
@@ -2251,20 +2331,37 @@ async def daily_schedule(client, group):
             if target_table != last_announced_table:
                 road_profile_cache.pop(target_table, None)
                 road_analysis_stamp = None
-                if last_announced_table is None:
-                    announce_msg = (
-                        f"🎰 <b>BÁO BÀN: {target_table}</b>\n"
-                        f"AE vào đúng bàn <b>{target_table}</b> theo lệnh.\n"
-                        f"{TELE_LINE}"
+                road_quality = str(active.get('roadQuality') or '').strip().lower()
+                road_profile = active.get('roadProfile') or {}
+                if not road_profile:
+                    try:
+                        table_payload = await asyncio.to_thread(
+                            get_table_by_name_api, target_table
+                        )
+                        road_profile = analyze_road_profile(table_payload)
+                        road_profile_cache[target_table] = road_profile
+                        if road_profile.get('ready'):
+                            road_quality = 'beautiful'
+                    except Exception:
+                        road_profile = {}
+                if road_quality == 'beautiful' or (
+                    isinstance(road_profile, dict) and road_profile.get('ready')
+                ):
+                    announce_msg = format_beautiful_table_announce(
+                        target_table,
+                        road_profile,
+                        from_table=last_announced_table,
                     )
-                    log_label = f"[BÁO BÀN] lần đầu → {target_table}"
+                    log_label = (
+                        f"[CẦU ĐẸP] {last_announced_table or '—'} → {target_table}"
+                    )
                 else:
-                    announce_msg = (
-                        f"🔄 <b>ĐỔI BÀN: {last_announced_table} → {target_table}</b>\n"
-                        f"AE chuyển sang bàn <b>{target_table}</b>.\n"
-                        f"{TELE_LINE}"
+                    announce_msg = format_random_table_announce(
+                        target_table, from_table=last_announced_table
                     )
-                    log_label = f"[ĐỔI BÀN] {last_announced_table} → {target_table}"
+                    log_label = (
+                        f"[BÀN RANDOM] {last_announced_table or '—'} → {target_table}"
+                    )
                 last_result_stamp = None
                 last_ho_key = None
                 print(
@@ -2289,19 +2386,31 @@ async def daily_schedule(client, group):
                     except Exception as e2:
                         print(f"[BÁO BÀN RETRY FAIL] {e2}", flush=True)
                 try:
-                    table_payload = await asyncio.to_thread(
-                        get_table_by_name_api, target_table
-                    )
-                    profile = analyze_road_profile(table_payload)
-                    road_profile_cache[target_table] = profile
-                    latest_at_entry = latest_total_round(table_payload) or {}
-                    road_analysis_stamp = latest_at_entry.get('stampTime')
-                    print(
-                        f"[PHÂN TÍCH CẦU] {target_table} type={profile.get('road_type')} "
-                        f"ready={profile.get('ready')} conf={profile.get('confidence')} "
-                        f"seq={profile.get('seq_display')} | {profile.get('trend')}",
-                        flush=True,
-                    )
+                    if target_table not in road_profile_cache:
+                        table_payload = await asyncio.to_thread(
+                            get_table_by_name_api, target_table
+                        )
+                        profile = analyze_road_profile(table_payload)
+                        road_profile_cache[target_table] = profile
+                        latest_at_entry = latest_total_round(table_payload) or {}
+                        road_analysis_stamp = latest_at_entry.get('stampTime')
+                        print(
+                            f"[PHÂN TÍCH CẦU] {target_table} type={profile.get('road_type')} "
+                            f"ready={profile.get('ready')} conf={profile.get('confidence')} "
+                            f"seq={profile.get('seq_display')} | {profile.get('trend')}",
+                            flush=True,
+                        )
+                    else:
+                        profile = road_profile_cache[target_table]
+                        latest_at_entry = {}
+                        try:
+                            table_payload = await asyncio.to_thread(
+                                get_table_by_name_api, target_table
+                            )
+                            latest_at_entry = latest_total_round(table_payload) or {}
+                        except Exception:
+                            pass
+                        road_analysis_stamp = latest_at_entry.get('stampTime')
                 except Exception as e_road:
                     print(f"[PHÂN TÍCH CẦU ERROR] {e_road}", flush=True)
                 await asyncio.sleep(0.3)
@@ -2337,13 +2446,20 @@ async def daily_schedule(client, group):
                             f"[PHÂN TÍCH CẦU] {target_table} không đạt chuẩn "
                             f"type={profile.get('road_type')} "
                             f"({profile.get('hand_count')}/{ROAD_ANALYSIS_MIN_BP}) "
-                            f"conf={profile.get('confidence')} — đổi ngay",
+                            f"conf={profile.get('confidence')} — tìm cầu đẹp / random",
                             flush=True,
                         )
+                    beautiful = await asyncio.to_thread(pick_beautiful_table_api)
+                    target_beautiful = None
+                    if beautiful and beautiful.get('tableName'):
+                        target_beautiful = beautiful['tableName']
+                        if target_beautiful == str(target_table).upper():
+                            target_beautiful = None
                     await asyncio.to_thread(
                         request_change_table_api,
                         target_table,
                         profile.get('reason') or 'cầu chưa đạt chuẩn',
+                        target_beautiful,
                     )
                     road_profile_cache.pop(target_table, None)
                     signal_is_fresh = False
