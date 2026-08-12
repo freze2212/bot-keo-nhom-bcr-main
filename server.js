@@ -335,16 +335,24 @@ app.post("/api/pick-beautiful-table", async (req, res) => {
           .map((c) => String(c || "").trim().toUpperCase())
           .filter(Boolean)
       : [];
+    const normCode = (c) => {
+      const m = String(c || "")
+        .toUpperCase()
+        .trim()
+        .match(/C?0*(\d+)/);
+      return m ? `C${String(m[1]).padStart(2, "0")}` : "";
+    };
+    freeCodes = freeCodes.map(normCode).filter(Boolean);
     if (!freeCodes.length) {
       const allDocs = await predictResultSchema
         .find({})
         .select("tableName -_id")
         .lean();
       freeCodes = (allDocs || [])
-        .map((d) => String(d.tableName || "").trim().toUpperCase())
+        .map((d) => normCode(d.tableName))
         .filter((c) => c && !occupied.has(c));
     }
-    const candidates = freeCodes.filter((c) => !occupied.has(c));
+    const candidates = [...new Set(freeCodes.filter((c) => !occupied.has(c)))];
     if (!candidates.length) {
       return res.json({
         success: false,
@@ -355,12 +363,14 @@ app.post("/api/pick-beautiful-table", async (req, res) => {
     }
 
     const docs = await predictResultSchema
-      .find({ tableName: { $in: candidates } })
+      .find({})
       .select("tableName totalRound percentCurrent shuffle maintenance -_id")
       .lean();
-    const byName = new Map(
-      (docs || []).map((d) => [String(d.tableName).toUpperCase(), d])
-    );
+    const byName = new Map();
+    for (const d of docs || []) {
+      const code = normCode(d.tableName);
+      if (code) byName.set(code, d);
+    }
 
     const ranked = [];
     for (const code of candidates) {

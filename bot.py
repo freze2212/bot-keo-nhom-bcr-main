@@ -731,8 +731,13 @@ def pick_beautiful_table_api(free_codes=None):
         }
         res_data = api_post_json('/api/pick-beautiful-table', body, timeout=8)
         if res_data.get('success') and res_data.get('tableName'):
+            raw = str(res_data['tableName']).strip().upper()
+            m = re.search(r'C?0*(\d+)', raw)
+            table = f"C{int(m.group(1)):02d}" if m else raw
+            if not table.startswith('C'):
+                return None
             return {
-                'tableName': str(res_data['tableName']).strip().upper(),
+                'tableName': table,
                 'profile': res_data.get('profile') or {},
             }
         return None

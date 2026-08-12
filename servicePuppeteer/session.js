@@ -1064,9 +1064,19 @@ function startActiveTableHeartbeat() {
     heartbeatBusy = true;
     try {
       if (!page || page.isClosed()) return;
+      // Đang vào bàn / đổi bàn / recover → không soi kick (canvas bàn cược dễ false-positive).
+      if (
+        enterInFlight ||
+        tableChangeInFlight ||
+        resetInFlight ||
+        sessionRecovering
+      ) {
+        return;
+      }
 
-      // Kick / hết phiên → out bàn + restart ngay (không chụp overlay)
-      const fatalUi = await detectFatalUiError({ checkCanvas: true }).catch(
+      // Heartbeat chỉ đọc text kick rõ ràng — KHÔNG soi canvas pixel
+      // (màu đỏ/hồng zone Cái trên bàn thật từng bị nhận nhầm SESSION_EXPIRED).
+      const fatalUi = await detectFatalUiError({ checkCanvas: false }).catch(
         () => null
       );
       if (fatalUi === "SESSION_EXPIRED" || fatalUi === "PAGE_CLOSED") {
@@ -1127,40 +1137,36 @@ function startActiveTableHeartbeat() {
   }, 4000);
 }
 
-/** Dialog kick / hết phiên — quét mọi node text (overlay canvas vẫn có DOM text). */
+/** Dialog kick / hết phiên — chỉ câu rõ ràng, tránh dính toast mạng tạm / chữ đăng nhập form. */
 async function detectSessionExpired() {
   const kickNeedles = [
     "hội thoại của bạn đã kết thúc",
     "session has expired",
     "your session has expired",
     "đăng nhập lại trò chơi",
-    "vui lòng đăng nhập lại",
     "please log in to the game again",
-    "please login again",
-    "please log in again",
     "bạn đã liên tục đăng nhập",
     "tự động đăng xuất",
     "xin lỗi !! bạn đã liên tục đăng nhập",
     "xin lỗi!! bạn đã liên tục đăng nhập",
-    "lỗi mạng",
-    "loi mang",
-    "network error",
-    "connection error",
-    "mất kết nối",
-    "mat ket noi",
-    "làm mới đường truyền thất bại",
     "logged on at another location",
     "logged in at another location",
     "logged off because you have logged on",
     "logged off because you have logged in",
-    "you have been logged off",
+    "you have been logged off because you have logged",
+    "vui lòng đăng nhập lại trò chơi",
+  ];
+  // Cặp từ: phải có cả 2 cụm mới tính kick (tránh "lỗi mạng" toast tạm).
+  const kickPairs = [
+    ["loi mang", "dang nhap lai"],
+    ["network error", "log in"],
+    ["mat ket noi", "dang nhap"],
   ];
   const frames = [
     gameCurrentFrame,
     seamlessFrame,
     gameHallFrame,
     page,
-    ...(page && typeof page.frames === "function" ? page.frames() : []),
   ].filter(Boolean);
   const seen = new Set();
   for (const f of frames) {
@@ -1168,43 +1174,55 @@ async function detectSessionExpired() {
     if (seen.has(f)) continue;
     seen.add(f);
     const hit = await withTimeout(
-      f.evaluate((needles) => {
-        const norm = (s) =>
-          String(s || "")
-            .toLowerCase()
-            .normalize("NFD")
-            .replace(/[\u0300-\u036f]/g, "");
-        const matchText = (raw) => {
-          const t = norm(raw);
-          if (!t) return false;
-          return needles.some((n) => t.includes(norm(n)));
-        };
-        if (matchText(document.documentElement?.innerText || "")) return true;
-        if (matchText(document.body?.innerText || "")) return true;
-        const nodes = document.querySelectorAll(
-          "div, span, p, h1, h2, h3, label, section, aside, button, .modal, .dialog, .van-dialog, .van-overlay"
-        );
-        for (const el of nodes) {
-          const txt = (el.innerText || el.textContent || "").trim();
-          if (!txt || txt.length > 240) continue;
-          try {
-            const st = window.getComputedStyle(el);
-            if (
-              st.display === "none" ||
-              st.visibility === "hidden" ||
-              Number(st.opacity) === 0
-            ) {
-              continue;
+      f.evaluate(
+        ({ needles, pairs }) => {
+          const norm = (s) =>
+            String(s || "")
+              .toLowerCase()
+              .normalize("NFD")
+              .replace(/[\u0300-\u036f]/g, "");
+          const matchText = (raw) => {
+            const t = norm(raw);
+            if (!t || t.length < 12) return null;
+            for (const n of needles) {
+              if (t.includes(norm(n))) return n;
             }
-          } catch (_) {}
-          if (matchText(txt)) return true;
-        }
-        return false;
-      }, kickNeedles).catch(() => false),
+            for (const [a, b] of pairs) {
+              if (t.includes(norm(a)) && t.includes(norm(b))) return `${a}+${b}`;
+            }
+            return null;
+          };
+          // Chỉ quét node modal/dialog/overlay ngắn — không quét cả body (form login dính false).
+          const nodes = document.querySelectorAll(
+            ".modal, .dialog, .van-dialog, .van-overlay, .publicModal, [class*='modal'], [class*='dialog'], [class*='overlay'], [class*='kick'], [class*='session']"
+          );
+          for (const el of nodes) {
+            const txt = (el.innerText || el.textContent || "").trim();
+            if (!txt || txt.length > 320) continue;
+            try {
+              const st = window.getComputedStyle(el);
+              if (
+                st.display === "none" ||
+                st.visibility === "hidden" ||
+                Number(st.opacity) === 0
+              ) {
+                continue;
+              }
+            } catch (_) {}
+            const m = matchText(txt);
+            if (m) return m;
+          }
+          return null;
+        },
+        { needles: kickNeedles, pairs: kickPairs }
+      ).catch(() => null),
       900,
-      false
+      null
     );
-    if (hit) return true;
+    if (hit) {
+      console.error(`[KICK TEXT] matched="${hit}"`);
+      return true;
+    }
   }
   return false;
 }
@@ -3003,8 +3021,7 @@ socket.on("request_change_table", async (data) => {
   }
   tableChangeInFlight = true;
   const fatalUi = await detectFatalUiError({
-    checkCanvas: true,
-    forceCanvas: true,
+    checkCanvas: false,
   }).catch(() => null);
   if (fatalUi === "SESSION_EXPIRED" || fatalUi === "PAGE_CLOSED") {
     tableChangeInFlight = false;

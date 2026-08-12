@@ -213,14 +213,13 @@ async function isFatalSessionScreenshot(input) {
     const redDarkRatio = redDark / sampled;
     const centerPinkRatio = centerPink / sampled;
     const peakPinkRowRatio = Math.max(...pinkByRow) / Math.max(1, width / step);
-    // Hai dạng overlay thực tế:
-    // 1) crop thấp: nền đen ~93%; 2) full iframe: gradient đỏ khiến dark chỉ ~70%.
-    // Chữ kick luôn là dải hồng dài ở chính giữa ảnh.
     const fatal =
-      (darkRatio >= 0.65 || redDarkRatio >= 0.8) &&
+      // Overlay kick full-frame: nền tối/đỏ + dải chữ hồng giữa.
+      // Siết dark để tránh nhầm zone Cái đỏ trên bàn đang chơi.
+      ((darkRatio >= 0.78 && redDarkRatio >= 0.55) || redDarkRatio >= 0.92) &&
       pinkRatio >= 0.004 &&
       centerPinkRatio >= 0.003 &&
-      peakPinkRowRatio >= 0.15;
+      peakPinkRowRatio >= 0.18;
     if (fatal) {
       console.error(
         `[SCREENSHOT FATAL UI] dark=${darkRatio.toFixed(3)} ` +
