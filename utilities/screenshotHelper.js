@@ -153,6 +153,46 @@ async function trimBlackBorders(filepath, threshold = 28, pad = 2, darkRatio = 0
 }
 
 /**
+ * Màn hình bị đá phiên của Sexy được vẽ trên canvas nên DOM không có text.
+ * Nhận diện trực tiếp ảnh: nền gần như tối hoàn toàn + cụm chữ hồng/đỏ lớn.
+ */
+async function isFatalSessionScreenshot(filepath) {
+  try {
+    const { Jimp } = require("jimp");
+    const image = await Jimp.read(filepath);
+    const { data, width, height } = image.bitmap;
+    const pixels = Math.max(1, width * height);
+    let dark = 0;
+    let pink = 0;
+
+    // Lấy mẫu toàn ảnh; bước 2 vẫn đủ chính xác và giảm CPU trên VPS.
+    const step = pixels > 800000 ? 2 : 1;
+    for (let p = 0; p < pixels; p += step) {
+      const i = p * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      if (r < 55 && g < 45 && b < 50) dark += 1;
+      if (r > 95 && r > g * 1.35 && b > 55 && b > g * 1.1) pink += 1;
+    }
+
+    const sampled = Math.ceil(pixels / step);
+    const darkRatio = dark / sampled;
+    const pinkRatio = pink / sampled;
+    const fatal = darkRatio >= 0.82 && pinkRatio >= 0.004;
+    if (fatal) {
+      console.error(
+        `[SCREENSHOT FATAL UI] dark=${darkRatio.toFixed(3)} pink=${pinkRatio.toFixed(3)} — SESSION_EXPIRED`
+      );
+    }
+    return fatal;
+  } catch (error) {
+    console.warn(`[SCREENSHOT FATAL UI] Không đọc được ảnh: ${error.message}`);
+    return false;
+  }
+}
+
+/**
  * Save screenshot from Playwright page or frame
  * @param {object} target - Playwright Page or Frame
  * @param {string} tableName - e.g. "C04"
@@ -211,6 +251,16 @@ async function saveScreenshot(target, tableName = "UNKNOWN", options = {}) {
 
     if (!saved) throw new Error("Target does not support .screenshot()");
 
+    // Không bao giờ lưu/gửi ảnh overlay kick. Xóa file ngay và báo session restart.
+    if (await isFatalSessionScreenshot(filepath)) {
+      await fs.unlink(filepath).catch(() => {});
+      return {
+        success: false,
+        fatalUi: "SESSION_EXPIRED",
+        error: "SESSION_EXPIRED_CANVAS",
+      };
+    }
+
     // Chỉ crop file ảnh (viền đen 4 phía), không sửa CSS game
     if (options.trimBlack !== false) {
       await trimBlackBorders(filepath);
@@ -237,5 +287,6 @@ module.exports = {
   cleanOldScreenshots,
   cleanOldScreenshotsForTable,
   trimBlackBorders,
+  isFatalSessionScreenshot,
   SCREENSHOT_DIR,
 };

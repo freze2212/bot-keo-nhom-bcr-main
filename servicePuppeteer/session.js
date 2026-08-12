@@ -2674,6 +2674,20 @@ async function captureTableRound(tableName, roundOptions = {}) {
       helper.delay(1200),
     ]);
 
+    // Overlay kick có thể xuất hiện trong lúc đóng modal; kiểm tra lại sát lúc chụp.
+    const fatalImmediatelyBeforeCapture = await detectFatalUiError().catch(
+      () => null
+    );
+    if (
+      fatalImmediatelyBeforeCapture === "SESSION_EXPIRED" ||
+      fatalImmediatelyBeforeCapture === "PAGE_CLOSED"
+    ) {
+      recoverFromFatalUi(fatalImmediatelyBeforeCapture).catch((e) =>
+        console.error("[RECOVER]", e.message)
+      );
+      return { success: false, reason: fatalImmediatelyBeforeCapture };
+    }
+
     await helper.appendToLog(
       `📸 Đang tiến hành chụp ảnh màn hình cho bàn ${cleanTarget}...`,
       logsNameProgress
@@ -2690,6 +2704,15 @@ async function captureTableRound(tableName, roundOptions = {}) {
       // VPS CPU không hỗ trợ binary Sharp hiện tại; bỏ crop để tránh load/error mỗi ván.
       trimBlack: false,
     });
+
+    // Text kick có thể nằm hoàn toàn trên canvas, không thể thấy qua innerText.
+    // screenshotHelper sẽ xóa ảnh đó; session phải restart và tuyệt đối không notify.
+    if (result?.fatalUi === "SESSION_EXPIRED") {
+      recoverFromFatalUi("SESSION_EXPIRED").catch((e) =>
+        console.error("[RECOVER]", e.message)
+      );
+      return { success: false, reason: "SESSION_EXPIRED_CANVAS" };
+    }
 
     if (result.success) {
       await helper.appendToLog(
