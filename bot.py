@@ -37,7 +37,32 @@ load_dotenv()
 def log(msg):
     print(msg, flush=True)
 
-LOCK_FILE = 'bot.lock'
+def lock_file_path():
+    ns = (os.getenv('NAME_SERVICE') or 'NS1').strip().upper() or 'NS1'
+    return f'bot_{ns}.lock'
+
+
+def ensure_single_instance():
+    """Mỗi NAME_SERVICE một lock — cho phép bot_sexy_1 + bot_sexy_2 chạy song song."""
+    lock_path = lock_file_path()
+    if os.path.exists(lock_path):
+        try:
+            with open(lock_path, encoding='utf-8') as f:
+                old_pid = int(f.read().strip())
+            if is_process_running(old_pid):
+                log(f"[ERROR] Bot {lock_path} da chay o PID {old_pid}. Tat bot cu roi chay lai.")
+                sys.exit(1)
+        except (ValueError, OSError):
+            pass
+    with open(lock_path, 'w', encoding='utf-8') as f:
+        f.write(str(os.getpid()))
+
+
+def release_lock():
+    try:
+        os.remove(lock_file_path())
+    except OSError:
+        pass
 
 
 def is_process_running(pid):
@@ -54,28 +79,6 @@ def is_process_running(pid):
         return True
     except OSError:
         return False
-
-
-def ensure_single_instance():
-    """Chi cho phep 1 bot.py chay cung luc (tranh database is locked)."""
-    if os.path.exists(LOCK_FILE):
-        try:
-            with open(LOCK_FILE, encoding='utf-8') as f:
-                old_pid = int(f.read().strip())
-            if is_process_running(old_pid):
-                log(f"[ERROR] Bot da chay o PID {old_pid}. Tat bot cu (Ctrl+C) roi chay lai.")
-                sys.exit(1)
-        except (ValueError, OSError):
-            pass
-    with open(LOCK_FILE, 'w', encoding='utf-8') as f:
-        f.write(str(os.getpid()))
-
-
-def release_lock():
-    try:
-        os.remove(LOCK_FILE)
-    except OSError:
-        pass
 
 
 def configure_sqlite_session(telegram_client):

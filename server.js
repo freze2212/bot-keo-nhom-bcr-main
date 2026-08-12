@@ -178,6 +178,16 @@ app.get("/api/get-active-table", (req, res) => {
       occupied: occupiedTablesList(),
     });
   }
+  if (ns) {
+    return res.json({
+      success: false,
+      activeTable: null,
+      readyAt: null,
+      nameService: ns,
+      occupied: occupiedTablesList(),
+      message: `Playwright ${ns} chưa vào bàn`,
+    });
+  }
   if (!currentTargetTable || currentTargetTable === "NONE" || currentTargetTable === "LOBBY") {
     return res.json({
       success: false,
