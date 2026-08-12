@@ -153,6 +153,21 @@ def session_name_from_phone(phone_number):
 
 SESSION_NAME = session_name_from_phone(phone)
 
+
+def get_group_env_value():
+    """NS1 → GROUP_NS1, NS2 → GROUP_NS2, fallback GROUP."""
+    ns = (os.getenv('NAME_SERVICE') or '').strip().upper()
+    if ns == 'NS1':
+        return (os.getenv('GROUP_NS1') or os.getenv('GROUP') or '').strip()
+    if ns == 'NS2':
+        return (os.getenv('GROUP_NS2') or os.getenv('GROUP') or '').strip()
+    return (os.getenv('GROUP') or '').strip()
+
+
+def get_name_service():
+    return (os.getenv('NAME_SERVICE') or 'NS1').strip().upper() or 'NS1'
+
+
 # ID hoặc username nhóm (có thể là @tennhom hoặc ID số)
 group = os.getenv('GROUP')
 source_username = (os.getenv('SOURCE_USERNAME') or 'house4179').strip() or 'house4179'
@@ -182,20 +197,6 @@ def normalize_chat_id(value):
         return int(raw)
     except ValueError:
         return '@' + raw.lstrip('@')
-
-
-def get_group_env_value():
-    """NS1 → GROUP_NS1, NS2 → GROUP_NS2, fallback GROUP."""
-    ns = (os.getenv('NAME_SERVICE') or '').strip().upper()
-    if ns == 'NS1':
-        return (os.getenv('GROUP_NS1') or os.getenv('GROUP') or '').strip()
-    if ns == 'NS2':
-        return (os.getenv('GROUP_NS2') or os.getenv('GROUP') or '').strip()
-    return (os.getenv('GROUP') or '').strip()
-
-
-def get_name_service():
-    return (os.getenv('NAME_SERVICE') or 'NS1').strip().upper() or 'NS1'
 
 
 def get_broadcast_chat_ids():
