@@ -1914,6 +1914,41 @@ def daily_state_path():
     return os.path.join(state_dir, f'daily_state_{ns}.json')
 
 
+def announced_table_state_path():
+    ns = (os.getenv('NAME_SERVICE') or 'NS1').strip().upper() or 'NS1'
+    state_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+    os.makedirs(state_dir, exist_ok=True)
+    return os.path.join(state_dir, f'last_announced_table_{ns}.json')
+
+
+def load_last_announced_table():
+    try:
+        with open(announced_table_state_path(), 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        table = str(data.get('table') or '').strip().upper()
+        return table if table and table not in ('NONE', 'LOBBY') else None
+    except Exception:
+        return None
+
+
+def save_last_announced_table(table_name):
+    table = str(table_name or '').strip().upper()
+    if not table or table in ('NONE', 'LOBBY'):
+        return
+    path = announced_table_state_path()
+    tmp = f'{path}.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(
+                {'table': table, 'updatedAt': int(time.time() * 1000)},
+                f,
+                ensure_ascii=False,
+            )
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f'[BÁO BÀN STATE WARN] {e}', flush=True)
+
+
 def current_pnl_day():
     return datetime.now(TZ).date().isoformat()
 
@@ -2078,7 +2113,12 @@ async def daily_schedule(client, group):
                 flush=True,
             )
 
-        last_announced_table = None
+        last_announced_table = load_last_announced_table()
+        if last_announced_table:
+            print(
+                f"[BÁO BÀN STATE] Đã báo {last_announced_table} trước đó — không báo trùng",
+                flush=True,
+            )
         round_count = 0
         bot_started_ms = int(time.time() * 1000)
         daily_state = load_daily_state()
@@ -2175,6 +2215,7 @@ async def daily_schedule(client, group):
                     group = await send_announce_message(group, announce_msg)
                     print(log_label, flush=True)
                     last_announced_table = target_table
+                    save_last_announced_table(target_table)
                 except Exception as e_ann:
                     print(f"[BÁO/ĐỔI BÀN ERROR] {e_ann}", flush=True)
                     try:
@@ -2182,6 +2223,7 @@ async def daily_schedule(client, group):
                             group = await resolve_group_entity(os.getenv('GROUP'))
                         group = await send_announce_message(group, announce_msg)
                         last_announced_table = target_table
+                        save_last_announced_table(target_table)
                         print(f"[BÁO BÀN RETRY OK] {log_label}", flush=True)
                     except Exception as e2:
                         print(f"[BÁO BÀN RETRY FAIL] {e2}", flush=True)

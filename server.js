@@ -381,7 +381,7 @@ app.post("/api/request-change-table", (req, res) => {
   const fromTable = String(req.body?.tableName || "").trim().toUpperCase() || null;
   console.log(`[CHANGE TABLE] ${ns} từ ${fromTable || "?"} — ${reason}`);
   // Chặn bot tiếp tục hô/báo lại bàn cũ trong lúc browser đang thao tác out bàn.
-  setActiveTable(null, ns);
+  setActiveTable("CLEAR", ns);
   io.emit("request_change_table", {
     nameService: ns,
     tableName: fromTable,
