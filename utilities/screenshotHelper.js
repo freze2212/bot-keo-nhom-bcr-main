@@ -156,10 +156,24 @@ async function trimBlackBorders(filepath, threshold = 28, pad = 2, darkRatio = 0
  * Màn hình bị đá phiên của Sexy được vẽ trên canvas nên DOM không có text.
  * Nhận diện trực tiếp ảnh: nền gần như tối hoàn toàn + cụm chữ hồng/đỏ lớn.
  */
-async function isFatalSessionScreenshot(filepath) {
+async function isFatalSessionScreenshot(input) {
   try {
     const { Jimp } = require("jimp");
-    const image = await Jimp.read(filepath);
+    const fsSync = require("fs");
+    // Buffer hoặc filepath đều được — detectCanvas truyền buffer.
+    if (typeof input === "string") {
+      try {
+        const st = fsSync.statSync(input);
+        // Ảnh kick full-frame thường rất nhẹ (~30–80KB) so với ảnh bàn thật ~0.8–1.5MB.
+        if (st.size > 0 && st.size < 90000) {
+          console.error(
+            `[SCREENSHOT FATAL UI] file quá nhỏ ${st.size}B — SESSION_EXPIRED`
+          );
+          return true;
+        }
+      } catch (_) {}
+    }
+    const image = await Jimp.read(input);
     const { data, width, height } = image.bitmap;
     const pixels = Math.max(1, width * height);
     let dark = 0;

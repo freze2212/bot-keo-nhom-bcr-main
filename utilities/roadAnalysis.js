@@ -189,14 +189,44 @@ function analyzeRoadProfile(totalRound, window) {
     if (lookback[i] !== lookback[i - 1]) flips += 1;
   }
   const chopRatio = flips / Math.max(1, lookback.length - 1);
+  const recent = seq.length >= 8 ? seq.slice(-8) : seq;
+  let recentFlips = 0;
+  for (let i = 1; i < recent.length; i++) {
+    if (recent[i] !== recent[i - 1]) recentFlips += 1;
+  }
+  const recentChop = recentFlips / Math.max(1, recent.length - 1);
   const biasRatio = Math.max(bCount, pCount) / Math.max(1, handCount);
+  const biasSide = bCount > pCount ? "B" : pCount > bCount ? "P" : null;
+  const biasConfirmed =
+    (biasSide === "B" || biasSide === "P") &&
+    seq.length >= 2 &&
+    seq[seq.length - 1] === biasSide &&
+    seq[seq.length - 2] === biasSide;
+  const streakBroken =
+    maxStreak >= 4 &&
+    streak <= 2 &&
+    (last === "B" || last === "P") &&
+    (maxSide === "B" || maxSide === "P") &&
+    last !== maxSide;
 
   let roadType = "NOISE";
   let side = null;
   let confidence = 0;
   let trend = "cầu lộn xộn";
 
-  if (chopRatio >= 0.78 && maxStreak <= 3) {
+  if (recentChop >= 0.72 && streak <= 2) {
+    roadType = "CHOP";
+    side = last === "B" ? "P" : "B";
+    confidence = 0.5 + Math.min(0.15, (recentChop - 0.72) * 2.0);
+    trend = `cầu gần đảo (${recentFlips}/${Math.max(1, recent.length - 1)}) — không spam`;
+  } else if (streakBroken) {
+    roadType = "BREAK";
+    side = null;
+    confidence = 0.4;
+    trend =
+      `bệt ${maxSide}x${maxStreak} vừa gãy → ` +
+      `${last === "B" ? "Cái" : "Con"} — chờ cầu mới`;
+  } else if (chopRatio >= 0.78 && maxStreak <= 3) {
     roadType = "CHOP";
     side = last === "B" ? "P" : "B";
     confidence = 0.52 + Math.min(0.18, (chopRatio - 0.78) * 2.5);
@@ -209,46 +239,59 @@ function analyzeRoadProfile(totalRound, window) {
       `nhịp ${rhythm.rhythm.join("-")}; dây hiện tại ` +
       `${rhythm.currentLength}/${rhythm.targetLength}`;
   } else if (streak >= 3 && (last === "B" || last === "P")) {
-    roadType = "BET";
-    side = last;
-    confidence =
-      0.68 +
-      Math.min(0.22, (streak - 3) * 0.07 + Math.max(0, maxStreak - streak) * 0.02);
-    trend = `bệt ${side === "B" ? "Cái" : "Con"} x${streak}`;
+    if (streak >= 8) {
+      roadType = "BREAK";
+      side = null;
+      confidence = 0.55;
+      trend = `bệt dài ${last === "B" ? "Cái" : "Con"} x${streak} — dừng hô, đổi bàn`;
+    } else {
+      roadType = "BET";
+      side = last;
+      confidence = 0.68 + Math.min(0.18, (streak - 3) * 0.05);
+      trend = `bệt ${side === "B" ? "Cái" : "Con"} x${streak}`;
+    }
   } else if (isTwoTwo(seq)) {
     roadType = "TWO_TWO";
     side = last === "B" ? "P" : "B";
-    confidence = 0.7;
+    confidence = 0.72;
     trend = "cầu 2-2 (BB PP lặp)";
-  } else if (biasRatio >= 0.58) {
-    roadType = "BIAS";
-    side = bCount > pCount ? "B" : "P";
-    confidence = 0.62 + Math.min(0.25, (Math.abs(bCount - pCount) / handCount) * 0.8);
-    trend = `lệch ${side === "B" ? "Cái" : "Con"} ${bCount}/${pCount}`;
   } else if (streak === 2 && (last === "B" || last === "P")) {
     roadType = "BET";
     side = last;
-    confidence = 0.64;
+    confidence = 0.66;
     trend = `bệt nhẹ ${side === "B" ? "Cái" : "Con"} x2`;
+  } else if (biasRatio >= 0.62 && biasConfirmed) {
+    roadType = "BIAS";
+    side = biasSide;
+    confidence =
+      0.6 + Math.min(0.12, (Math.abs(bCount - pCount) / handCount) * 0.5);
+    trend = `lệch xác nhận ${side === "B" ? "Cái" : "Con"} ${bCount}/${pCount}`;
   } else {
     roadType = "NOISE";
     confidence = 0.35;
-    trend = "cầu chưa rõ — không vào kèo";
+    trend =
+      biasRatio >= 0.58 && !biasConfirmed
+        ? "lệch cũ nhưng gần không khớp — không hô spam"
+        : "cầu chưa rõ — không vào kèo";
   }
 
-  const ready =
-    !["CHOP", "NOISE", "WAIT"].includes(roadType) &&
+  let ready =
+    ["BET", "RHYTHM", "TWO_TWO", "PATTERN"].includes(roadType) &&
     confidence >= ROAD_ANALYSIS_MIN_CONF;
+  if (roadType === "BIAS" && confidence >= Math.max(ROAD_ANALYSIS_MIN_CONF, 0.78)) {
+    ready = true;
+  }
 
   let reason = trend;
   if (roadType === "CHOP") reason = "cầu chop — bỏ bàn";
+  if (roadType === "BREAK") reason = "bệt vừa gãy — chờ cầu mới";
   if (roadType === "NOISE") reason = "cầu lộn xộn — chưa đủ xu hướng";
+  if (roadType === "BIAS" && !ready) reason = "lệch nhẹ — chưa đủ chuẩn hô";
 
-  // Score để xếp hạng bàn: ưu tiên BET/TWO_TWO > BIAS, conf cao, bệt dài
   let score = 0;
   if (ready) {
     const typeBoost =
-      { BET: 3.0, RHYTHM: 2.9, TWO_TWO: 2.6, BIAS: 2.0, PATTERN: 1.8 }[
+      { BET: 3.0, RHYTHM: 2.9, TWO_TWO: 2.6, PATTERN: 1.8, BIAS: 1.2 }[
         roadType
       ] || 1.0;
     score = typeBoost + confidence * 2 + Math.min(streak, 6) * 0.15;

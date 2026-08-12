@@ -1098,22 +1098,21 @@ def decide_road_signal(payload):
     scores = {'B': 0.0, 'P': 0.0}
     reasons = []
 
-    # percentCurrent từ server (buildRoadPercentCurrent) — tín hiệu chính
-    pc = payload.get('percentCurrent') if isinstance(payload, dict) else None
-    if isinstance(pc, dict):
-        pc_side = _norm_bp_side(pc.get('Round') or pc.get('round'))
-        try:
-            pc_forecast = float(pc.get('Forecast') or 0)
-        except (TypeError, ValueError):
-            pc_forecast = 0.0
-        if pc_side in ('B', 'P'):
-            pc_w = 2.8 if pc_forecast >= 70 else (2.2 if pc_forecast >= 65 else 1.6)
-            scores[pc_side] += pc_w
-            reasons.append(f'road_pc→{pc_side}+{pc_w:.1f}')
-
     last, streak = _current_streak(seq)
-    if last and streak >= 2:
-        w = 2.2 if streak >= 4 else (1.7 if streak == 3 else 1.2)
+    recent = seq[-8:] if len(seq) >= 8 else seq
+    recent_flips = sum(
+        1 for i in range(1, len(recent)) if recent[i] != recent[i - 1]
+    )
+    recent_chop = recent_flips / max(1, len(recent) - 1)
+
+    # Cầu gần đang 1-1 / lộn → ưu tiên đảo, không bám bias xa
+    if recent_chop >= 0.7 and max(streak, 0) <= 2:
+        opp = 'P' if seq[-1] == 'B' else 'B'
+        scores[opp] += 2.0
+        reasons.append(f'recent_chop→{opp}+2.0')
+    elif last and streak >= 2:
+        # Chỉ theo bệt khi dây còn đang chạy; không cộng bias xa
+        w = 2.4 if streak >= 5 else (2.0 if streak >= 4 else (1.6 if streak == 3 else 1.1))
         scores[last] += w
         reasons.append(f'bệt{streak}{last}+{w:.1f}')
 
@@ -1125,51 +1124,53 @@ def decide_road_signal(payload):
     if _is_two_two(seq):
         # Sau BB PP BB → tiếp P (mở block mới đối lập)
         nxt = 'P' if seq[-1] == 'B' else 'B'
-        scores[nxt] += 1.5
-        reasons.append(f'2-2→{nxt}+1.5')
+        scores[nxt] += 1.8
+        reasons.append(f'2-2→{nxt}+1.8')
 
     rhythm = _run_length_pattern(seq)
     if rhythm and rhythm.get('side') in ('B', 'P'):
         rhythm_side = rhythm['side']
-        scores[rhythm_side] += 1.8
+        scores[rhythm_side] += 2.2
         rhythm_name = '-'.join(str(x) for x in rhythm['rhythm'])
-        reasons.append(f'nhịp{rhythm_name}→{rhythm_side}+1.8')
+        reasons.append(f'nhịp{rhythm_name}→{rhythm_side}+2.2')
 
     for size in (2, 3, 4):
         nxt = _pattern_next(seq, size)
         if nxt in ('B', 'P'):
-            scores[nxt] += 1.1
-            reasons.append(f'repeat{size}→{nxt}+1.1')
+            scores[nxt] += 1.2
+            reasons.append(f'repeat{size}→{nxt}+1.2')
             break
 
     for n in (3, 4, 5):
         nxt = _ngram_next(seq, n)
         if nxt in ('B', 'P'):
-            scores[nxt] += 1.0 + (n - 3) * 0.15
+            scores[nxt] += 1.1 + (n - 3) * 0.15
             reasons.append(f'ngram{n}→{nxt}')
             break
 
+    # Bias chỉ hỗ trợ nhẹ và phải khớp 2 tay gần nhất — tránh spam cùng 1 cửa
     window = seq[-12:] if len(seq) >= 12 else seq
     b_cnt = window.count('B')
     p_cnt = window.count('P')
-    if b_cnt != p_cnt:
+    if b_cnt != p_cnt and len(seq) >= 2 and seq[-1] == seq[-2]:
         bias = 'B' if b_cnt > p_cnt else 'P'
-        scores[bias] += 0.7
-        reasons.append(f'bias{len(window)}→{bias}({b_cnt}/{p_cnt})')
+        if bias == seq[-1]:
+            scores[bias] += 0.35
+            reasons.append(f'bias_confirm→{bias}({b_cnt}/{p_cnt})')
 
     # AI calculators (bỏ ai0 = percentCurrent random)
-    for key, weight in (('ai1', 0.9), ('ai2', 0.8), ('ai3', 0.7), ('ai4', 0.7)):
+    for key, weight in (('ai1', 0.7), ('ai2', 0.6), ('ai3', 0.5), ('ai4', 0.5)):
         side, conf = _ai_side_from_payload(payload, key)
         if side in ('B', 'P'):
             scores[side] += weight * max(0.4, min(1.0, conf))
             reasons.append(f'{key}→{side}')
 
-    # Không dùng percentCurrent random làm vote chính; chỉ tie-break rất nhẹ
+    # percentCurrent chỉ tie-break — trước đây +2.8 khiến hô spam cùng cửa
     pc = payload.get('percentCurrent') if isinstance(payload, dict) else None
     if isinstance(pc, dict):
         rnd = _norm_bp_side(pc.get('Round') or pc.get('round'))
-        if rnd in ('B', 'P') and abs(scores['B'] - scores['P']) < 0.35:
-            scores[rnd] += 0.15
+        if rnd in ('B', 'P') and abs(scores['B'] - scores['P']) < 0.45:
+            scores[rnd] += 0.2
             reasons.append(f'pc_tiebreak→{rnd}')
 
     if scores['B'] == scores['P'] == 0:
@@ -1260,15 +1261,48 @@ def analyze_road_profile(payload, window=None):
     lookback = seq[-18:] if len(seq) >= 18 else seq
     flips = sum(1 for i in range(1, len(lookback)) if lookback[i] != lookback[i - 1])
     chop_ratio = flips / max(1, len(lookback) - 1)
+    recent = seq[-8:] if len(seq) >= 8 else seq
+    recent_flips = sum(
+        1 for i in range(1, len(recent)) if recent[i] != recent[i - 1]
+    )
+    recent_chop = recent_flips / max(1, len(recent) - 1)
     b_cnt, p_cnt = base['b_count'], base['p_count']
     bias_ratio = max(b_cnt, p_cnt) / max(1, hand_count)
+    bias_side = 'B' if b_cnt > p_cnt else ('P' if p_cnt > b_cnt else None)
+    bias_confirmed = (
+        bias_side in ('B', 'P')
+        and len(seq) >= 2
+        and seq[-1] == bias_side
+        and seq[-2] == bias_side
+    )
+    # Bệt dài vừa gãy → không nhảy sang hô cửa lệch cũ
+    streak_broken = (
+        max_streak >= 4
+        and streak <= 2
+        and last in ('B', 'P')
+        and max_side in ('B', 'P')
+        and last != max_side
+    )
 
     road_type = 'NOISE'
     side = None
     confidence = 0.0
     trend = 'cầu lộn xộn'
 
-    if chop_ratio >= 0.78 and max_streak <= 3:
+    if recent_chop >= 0.72 and streak <= 2:
+        road_type = 'CHOP'
+        side = 'P' if last == 'B' else 'B'
+        confidence = 0.50 + min(0.15, (recent_chop - 0.72) * 2.0)
+        trend = f'cầu gần đảo ({recent_flips}/{max(1, len(recent) - 1)}) — không spam'
+    elif streak_broken:
+        road_type = 'BREAK'
+        side = None
+        confidence = 0.40
+        trend = (
+            f'bệt {max_side}x{max_streak} vừa gãy → '
+            f'{"Cái" if last == "B" else "Con"} — chờ cầu mới'
+        )
+    elif chop_ratio >= 0.78 and max_streak <= 3:
         road_type = 'CHOP'
         side = 'P' if last == 'B' else 'B'
         confidence = 0.52 + min(0.18, (chop_ratio - 0.78) * 2.5)
@@ -1285,28 +1319,40 @@ def analyze_road_profile(payload, window=None):
     elif streak >= 3 and last in ('B', 'P'):
         road_type = 'BET'
         side = last
-        confidence = 0.68 + min(0.22, (streak - 3) * 0.07 + max(0, max_streak - streak) * 0.02)
-        trend = f'bệt {"Cái" if side == "B" else "Con"} x{streak}'
+        # Bệt quá dài (>7) dễ gãy — không hô tiếp, đổi bàn
+        confidence = 0.68 + min(0.18, (streak - 3) * 0.05)
+        if streak >= 8:
+            confidence = 0.55
+            road_type = 'BREAK'
+            side = None
+            trend = f'bệt dài {"Cái" if last == "B" else "Con"} x{streak} — dừng hô, đổi bàn'
+        else:
+            trend = f'bệt {"Cái" if last == "B" else "Con"} x{streak}'
     elif _is_two_two(seq):
         road_type = 'TWO_TWO'
         side = 'P' if last == 'B' else 'B'
-        confidence = 0.70
+        confidence = 0.72
         trend = 'cầu 2-2 (BB PP lặp)'
-    elif bias_ratio >= 0.58:
-        road_type = 'BIAS'
-        side = 'B' if b_cnt > p_cnt else 'P'
-        confidence = 0.62 + min(0.25, abs(b_cnt - p_cnt) / hand_count * 0.8)
-        trend = f'lệch {"Cái" if side == "B" else "Con"} {b_cnt}/{p_cnt}'
     elif streak == 2 and last in ('B', 'P'):
         road_type = 'BET'
         side = last
-        confidence = 0.64
+        confidence = 0.66
         trend = f'bệt nhẹ {"Cái" if side == "B" else "Con"} x2'
+    elif bias_ratio >= 0.62 and bias_confirmed:
+        road_type = 'BIAS'
+        side = bias_side
+        confidence = 0.60 + min(0.12, abs(b_cnt - p_cnt) / hand_count * 0.5)
+        trend = f'lệch xác nhận {"Cái" if side == "B" else "Con"} {b_cnt}/{p_cnt}'
     else:
         signal = decide_road_signal(payload)
         sig_side = signal.get('side')
         sig_conf = float(signal.get('confidence') or 0)
-        if sig_side in ('B', 'P') and sig_conf >= 0.62 and not signal.get('unstable'):
+        if (
+            sig_side in ('B', 'P')
+            and sig_conf >= 0.68
+            and not signal.get('unstable')
+            and recent_chop < 0.65
+        ):
             road_type = 'PATTERN'
             side = sig_side
             confidence = sig_conf
@@ -1314,20 +1360,33 @@ def analyze_road_profile(payload, window=None):
         else:
             road_type = 'NOISE'
             confidence = max(0.35, sig_conf * 0.85 if sig_conf else 0.35)
-            trend = 'cầu chưa rõ — không vào kèo'
+            if bias_ratio >= 0.58 and not bias_confirmed:
+                trend = 'lệch cũ nhưng gần không khớp — không hô spam'
+            else:
+                trend = 'cầu chưa rõ — không vào kèo'
 
     signal = decide_road_signal(payload)
     if side in ('B', 'P') and signal.get('side') == side:
-        confidence = min(0.96, confidence + 0.08)
+        confidence = min(0.96, confidence + 0.05)
     elif side in ('B', 'P') and signal.get('side') in ('B', 'P') and signal.get('side') != side:
-        confidence = max(0.0, confidence - 0.12)
+        confidence = max(0.0, confidence - 0.15)
 
-    bettable = road_type not in ('CHOP', 'NOISE', 'WAIT') and confidence >= ROAD_ANALYSIS_MIN_CONF
+    # BIAS chỉ hô khi conf đủ cao; BREAK/CHOP/NOISE không hô
+    bettable = (
+        road_type in ('BET', 'RHYTHM', 'TWO_TWO', 'PATTERN')
+        and confidence >= ROAD_ANALYSIS_MIN_CONF
+    )
+    if road_type == 'BIAS' and confidence >= max(ROAD_ANALYSIS_MIN_CONF, 0.78):
+        bettable = True
     reason = trend
     if road_type == 'CHOP':
         reason = 'cầu chop — bỏ bàn, chờ cầu khác'
+    elif road_type == 'BREAK':
+        reason = 'bệt vừa gãy — chờ cầu mới, không spam cửa cũ'
     elif road_type == 'NOISE':
         reason = 'cầu lộn xộn — chưa đủ xu hướng'
+    elif road_type == 'BIAS' and not bettable:
+        reason = 'lệch nhẹ — chưa đủ chuẩn hô'
 
     base.update({
         'ready': bettable,
@@ -1357,7 +1416,9 @@ def format_road_analysis_message(table_name, profile):
         'CHOP': 'CHOP 1-1',
         'TWO_TWO': 'CẦU 2-2',
         'BIAS': 'LỆCH CỬA',
+        'RHYTHM': 'NHỊP',
         'PATTERN': 'PATTERN',
+        'BREAK': 'GÃY BỆT',
         'NOISE': 'LỘN XỘN',
         'WAIT': 'CHỜ DỮ LIỆU',
     }

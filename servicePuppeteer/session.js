@@ -1130,10 +1130,21 @@ async function detectSessionExpired() {
     "session has expired",
     "your session has expired",
     "đăng nhập lại trò chơi",
+    "vui lòng đăng nhập lại",
     "please log in to the game again",
+    "please login again",
+    "please log in again",
     "bạn đã liên tục đăng nhập",
     "tự động đăng xuất",
     "xin lỗi",
+    "lỗi mạng",
+    "loi mang",
+    "network error",
+    "connection error",
+    "mất kết nối",
+    "mat ket noi",
+    "kết nối mạng",
+    "làm mới đường truyền thất bại",
     "logged on at another location",
     "logged in at another location",
     "logged off because you have logged on",
@@ -1260,9 +1271,11 @@ async function detectFatalUiError(options = {}) {
   if (!page || page.isClosed()) return "PAGE_CLOSED";
   const expired = await detectSessionExpired().catch(() => false);
   if (expired) return "SESSION_EXPIRED";
-  if (options.checkCanvas) {
+  // Luôn check canvas khi chụp / đổi bàn; throttle chỉ cho heartbeat.
+  const checkCanvas = options.checkCanvas !== false;
+  if (checkCanvas) {
     const canvasExpired = await detectCanvasSessionExpired(
-      !!options.forceCanvas
+      !!options.forceCanvas || options.checkCanvas === true
     ).catch(() => false);
     if (canvasExpired) return "SESSION_EXPIRED";
   }
@@ -2732,8 +2745,14 @@ async function captureTableRound(tableName, roundOptions = {}) {
 
     const cleanTarget = String(tableName || currentInTable).trim().toUpperCase();
 
-    const fatalUi = await detectFatalUiError().catch(() => null);
+    const fatalUi = await detectFatalUiError({
+      checkCanvas: true,
+      forceCanvas: true,
+    }).catch(() => null);
     if (fatalUi === "SESSION_EXPIRED" || fatalUi === "PAGE_CLOSED") {
+      console.error(
+        `[CAPTURE BLOCK] ${fatalUi} — game báo lỗi phiên/mạng, KHÔNG chụp ảnh`
+      );
       recoverFromFatalUi(fatalUi).catch((e) => console.error("[RECOVER]", e.message));
       return { success: false, reason: fatalUi };
     }
@@ -2745,13 +2764,17 @@ async function captureTableRound(tableName, roundOptions = {}) {
     ]);
 
     // Overlay kick có thể xuất hiện trong lúc đóng modal; kiểm tra lại sát lúc chụp.
-    const fatalImmediatelyBeforeCapture = await detectFatalUiError().catch(
-      () => null
-    );
+    const fatalImmediatelyBeforeCapture = await detectFatalUiError({
+      checkCanvas: true,
+      forceCanvas: true,
+    }).catch(() => null);
     if (
       fatalImmediatelyBeforeCapture === "SESSION_EXPIRED" ||
       fatalImmediatelyBeforeCapture === "PAGE_CLOSED"
     ) {
+      console.error(
+        `[CAPTURE BLOCK] ${fatalImmediatelyBeforeCapture} ngay trước chụp — bỏ ảnh lỗi`
+      );
       recoverFromFatalUi(fatalImmediatelyBeforeCapture).catch((e) =>
         console.error("[RECOVER]", e.message)
       );
@@ -3022,7 +3045,10 @@ socket.on("new_round_completed", async (data) => {
   // Đúng 1 capture / ván, gắn resultWinner = P/B/T API
   if (page && !page.isClosed()) {
     try {
-      const fatalBefore = await detectFatalUiError().catch(() => null);
+      const fatalBefore = await detectFatalUiError({
+        checkCanvas: true,
+        forceCanvas: true,
+      }).catch(() => null);
       if (fatalBefore === "SESSION_EXPIRED" || fatalBefore === "PAGE_CLOSED") {
         recoverFromFatalUi(fatalBefore).catch((e) => console.error("[RECOVER]", e.message));
         return;
