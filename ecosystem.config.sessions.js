@@ -9,7 +9,7 @@ const path = require("path");
 
 const sharedEnv = {
   HEADLESS: "1",
-  USE_FIREFOX: "0",
+  USE_FIREFOX: "1",
   BLOCK_MEDIA: "1",
   HEARTBEAT_MS: "15000",
   VIEWPORT_W: "1280",

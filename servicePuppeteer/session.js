@@ -89,7 +89,8 @@ async function main() {
       process.env.HEADLESS === "true" ||
       process.env.HEADLESS === "TRUE";
 
-    const useFirefox = process.env.USE_FIREFOX === "1";
+    // Mặc định Firefox (ổn định sảnh Sexy trên VPS). Chromium: USE_FIREFOX=0
+    const useFirefox = process.env.USE_FIREFOX !== "0";
     const launcher = useFirefox ? firefox : chromium;
     const launchOpts = {
       headless: headless,
