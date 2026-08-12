@@ -88,6 +88,7 @@ process.once("exit", releaseAccountLock);
 let mainInFlight = null;
 let resetInFlight = null;
 let pendingResetAfterMain = false;
+let reloginNotBefore = 0;
 
 async function closeBrowserHard(reason = "") {
   try {
@@ -1286,6 +1287,11 @@ async function recoverFromFatalUi(reason) {
   currentInTable = null;
   pendingPlaceBetSide = null;
   pendingPlaceBetAmount = null;
+  if (reason === "SESSION_EXPIRED") {
+    // Sexy có thể chưa giải phóng phiên vừa bị đá. Login lại sau 2 giây dễ
+    // bị xem là chính phiên cũ đăng nhập chồng và tạo vòng kick liên tục.
+    reloginNotBefore = Math.max(reloginNotBefore, Date.now() + 20000);
+  }
   console.log(`❌ [FATAL UI] ${reason} — bỏ chụp, RESTART session`);
   await helper.appendToLog(
     `❌ [FATAL UI] ${reason} — không chụp overlay lỗi, TỰ ĐỘNG resetMain`,
@@ -3137,7 +3143,14 @@ async function resetMain() {
       // Đóng browser NGAY — không delay 10s trước close (trước đây leak nhiều headless-shell)
       await closeBrowserHard("resetMain");
       isCollecting = false;
-      await helper.delay(2000);
+      const cooldownMs = Math.max(2000, reloginNotBefore - Date.now());
+      if (cooldownMs > 2000) {
+        console.log(
+          `[RESET] chờ ${(cooldownMs / 1000).toFixed(1)}s để phiên cũ giải phóng trước khi login lại`
+        );
+      }
+      await helper.delay(cooldownMs);
+      reloginNotBefore = 0;
       timeSendSessionNearest = helper.getCurrentTime().timeUnix;
       await helper.appendToLog(
         "Khởi động lại chương trình (1 browser)...",
