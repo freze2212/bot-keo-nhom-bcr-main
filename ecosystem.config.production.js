@@ -1,4 +1,4 @@
-/** PM2 production — 3 process, không cron_restart (tránh restart giật data) */
+/** PM2 production — server + 2 session + 2 bot (mỗi bot 2 nhóm Telegram) */
 module.exports = {
   apps: [
     {
@@ -30,10 +30,11 @@ module.exports = {
       restart_delay: 10000,
       max_memory_restart: "1536M",
       env_file: ".env",
+      env: { ACCOUNT_INDEX: "1" },
     },
     {
       name: "session_sexy_2",
-      script: "./servicePuppeteer/session2.js",
+      script: "./servicePuppeteer/session.js",
       node_args: "--max-old-space-size=1536",
       interpreter_args: "-r dotenv/config",
       instances: 1,
@@ -45,6 +46,39 @@ module.exports = {
       restart_delay: 10000,
       max_memory_restart: "1536M",
       env_file: ".env",
+      env: { ACCOUNT_INDEX: "2" },
+    },
+    {
+      name: "bot_sexy_1",
+      script: "bot.py",
+      interpreter: "./venv/bin/python",
+      cwd: __dirname,
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_restarts: 10,
+      restart_delay: 8000,
+      env_file: ".env",
+      env: {
+        PYTHONUNBUFFERED: "1",
+        NAME_SERVICE: "NS1",
+      },
+    },
+    {
+      name: "bot_sexy_2",
+      script: "bot.py",
+      interpreter: "./venv/bin/python",
+      cwd: __dirname,
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_restarts: 10,
+      restart_delay: 8000,
+      env_file: ".env",
+      env: {
+        PYTHONUNBUFFERED: "1",
+        NAME_SERVICE: "NS2",
+      },
     },
   ],
 };

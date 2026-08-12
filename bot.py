@@ -156,7 +156,7 @@ SESSION_NAME = session_name_from_phone(phone)
 # ID hoặc username nhóm (có thể là @tennhom hoặc ID số)
 group = os.getenv('GROUP')
 source_username = (os.getenv('SOURCE_USERNAME') or 'house4179').strip() or 'house4179'
-log(f"GROUP tu .env: {group}")
+log(f"GROUP tu .env: {get_group_env_value()} | NAME_SERVICE={get_name_service()}")
 log(f"Session: {SESSION_NAME} | PHONE tu .env: {phone}")
 log(f"SOURCE_USERNAME tu .env/fallback: {source_username}")
 
@@ -184,10 +184,24 @@ def normalize_chat_id(value):
         return '@' + raw.lstrip('@')
 
 
+def get_group_env_value():
+    """NS1 → GROUP_NS1, NS2 → GROUP_NS2, fallback GROUP."""
+    ns = (os.getenv('NAME_SERVICE') or '').strip().upper()
+    if ns == 'NS1':
+        return (os.getenv('GROUP_NS1') or os.getenv('GROUP') or '').strip()
+    if ns == 'NS2':
+        return (os.getenv('GROUP_NS2') or os.getenv('GROUP') or '').strip()
+    return (os.getenv('GROUP') or '').strip()
+
+
+def get_name_service():
+    return (os.getenv('NAME_SERVICE') or 'NS1').strip().upper() or 'NS1'
+
+
 def get_broadcast_chat_ids():
     ids = []
     seen = set()
-    for item in parse_group_values(os.getenv('GROUP')):
+    for item in parse_group_values(get_group_env_value()):
         cid = normalize_chat_id(item)
         if cid is None:
             continue
@@ -752,7 +766,9 @@ def get_real_screenshot_path(table_name=None):
 def get_active_table_api():
     """Chỉ trả bàn khi Playwright ĐÃ VÀO BÀN và notify (có readyAt)."""
     try:
-        res_data = api_get_json('/api/get-active-table', timeout=5)
+        ns = get_name_service()
+        path = f'/api/get-active-table?nameService={urllib.parse.quote(ns)}'
+        res_data = api_get_json(path, timeout=5)
         if res_data.get('success') and res_data.get('activeTable'):
             table = str(res_data['activeTable']).upper().strip()
             if table and table not in ('NONE', 'LOBBY'):
@@ -924,7 +940,12 @@ def request_capture_now_api(table_name):
 def request_session_restart_api():
     """Yêu cầu Playwright session restart (sau 60s không có API kết quả)."""
     try:
-        res_data = api_post_json('/api/request-session-restart', {}, timeout=5)
+        ns = get_name_service()
+        res_data = api_post_json(
+            '/api/request-session-restart',
+            {'nameService': ns},
+            timeout=5,
+        )
         print(f"[API RESTART SESSION] {res_data}", flush=True)
         return res_data
     except Exception as e:

@@ -40,6 +40,8 @@ router(app);
 // API lưu và phát tín hiệu Báo Bàn Target cho Playwright & Telegram Bot
 let currentTargetTable = null;
 let activeTableReadyAt = null; // chỉ hô sau khi Playwright vào bàn thật
+/** Mỗi NS 1 bàn — tránh 2 session cùng bàn */
+const activeTablesByNs = {};
 const latestScreenshots = {};
 
 const io = socketIO(server, {
@@ -49,31 +51,70 @@ const io = socketIO(server, {
   },
 });
 
+function occupiedTablesList(exceptNs) {
+  const out = [];
+  for (const [ns, info] of Object.entries(activeTablesByNs)) {
+    if (exceptNs && ns === exceptNs) continue;
+    if (info?.tableName) out.push({ nameService: ns, tableName: info.tableName });
+  }
+  return out;
+}
+
 function setActiveTable(tableName, nameService) {
   if (!tableName) return null;
   const key = String(tableName).trim().toUpperCase();
+  const ns = String(nameService || "NS1").trim().toUpperCase() || "NS1";
   if (key === "NONE" || key === "LOBBY" || key === "CLEAR") {
-    currentTargetTable = null;
-    activeTableReadyAt = null;
-    console.log(`[ACTIVE TABLE] CLEARED (${nameService || "NS"}) — chờ Playwright vào bàn`);
+    delete activeTablesByNs[ns];
+    if (!Object.keys(activeTablesByNs).length) {
+      currentTargetTable = null;
+      activeTableReadyAt = null;
+    } else if (currentTargetTable) {
+      const still = Object.values(activeTablesByNs).some(
+        (x) => x.tableName === currentTargetTable
+      );
+      if (!still) {
+        const first = Object.values(activeTablesByNs)[0];
+        currentTargetTable = first?.tableName || null;
+        activeTableReadyAt = first?.readyAt || null;
+      }
+    }
+    console.log(`[ACTIVE TABLE] CLEARED (${ns}) — chờ Playwright vào bàn`);
     io.emit("active_table_updated", {
       tableName: null,
-      nameService: nameService || null,
+      nameService: ns,
       readyAt: null,
+      occupied: occupiedTablesList(),
     });
     return null;
   }
+
+  // Trùng bàn với NS khác → conflict
+  for (const [otherNs, info] of Object.entries(activeTablesByNs)) {
+    if (otherNs === ns) continue;
+    if (info?.tableName === key) {
+      const err = new Error(`TABLE_OCCUPIED_BY_${otherNs}`);
+      err.code = "TABLE_OCCUPIED";
+      err.occupiedBy = otherNs;
+      err.tableName = key;
+      throw err;
+    }
+  }
+
+  activeTablesByNs[ns] = { tableName: key, readyAt: Date.now() };
   currentTargetTable = key;
   activeTableReadyAt = Date.now();
   console.log(`\n==================================================`);
-  console.log(`🎯 ACTIVE TABLE READY: ${currentTargetTable} (${nameService || "NS"}) @ ${activeTableReadyAt}`);
+  console.log(`🎯 ACTIVE TABLE READY: ${key} (${ns}) @ ${activeTableReadyAt}`);
+  console.log(`   occupied: ${JSON.stringify(occupiedTablesList())}`);
   console.log(`==================================================\n`);
   io.emit("active_table_updated", {
-    tableName: currentTargetTable,
-    nameService: nameService || null,
+    tableName: key,
+    nameService: ns,
     readyAt: activeTableReadyAt,
+    occupied: occupiedTablesList(),
   });
-  return currentTargetTable;
+  return key;
 }
 
 app.post("/api/set-target-table", (req, res) => {
@@ -91,16 +132,58 @@ app.post("/api/notify-active-table", async (req, res) => {
   if (!tableName) {
     return res.status(400).json({ success: false, message: "Missing tableName" });
   }
-  const key = setActiveTable(tableName, nameService);
-  return res.json({ success: true, activeTable: key });
+  try {
+    const key = setActiveTable(tableName, nameService);
+    return res.json({
+      success: true,
+      activeTable: key,
+      occupied: occupiedTablesList(),
+    });
+  } catch (e) {
+    if (e.code === "TABLE_OCCUPIED") {
+      console.log(
+        `[TABLE CONFLICT] ${nameService} muốn ${e.tableName} nhưng ${e.occupiedBy} đang giữ`
+      );
+      return res.status(409).json({
+        success: false,
+        code: "TABLE_OCCUPIED",
+        tableName: e.tableName,
+        occupiedBy: e.occupiedBy,
+        occupied: occupiedTablesList(nameService),
+        message: `Bàn ${e.tableName} đã có ${e.occupiedBy} — chọn bàn khác`,
+      });
+    }
+    throw e;
+  }
+});
+
+app.get("/api/occupied-tables", (req, res) => {
+  return res.json({
+    success: true,
+    occupied: occupiedTablesList(),
+    tables: occupiedTablesList().map((x) => x.tableName),
+  });
 });
 
 app.get("/api/get-active-table", (req, res) => {
+  const ns = req.query.nameService
+    ? String(req.query.nameService).trim().toUpperCase()
+    : null;
+  if (ns && activeTablesByNs[ns]) {
+    return res.json({
+      success: true,
+      activeTable: activeTablesByNs[ns].tableName,
+      readyAt: activeTablesByNs[ns].readyAt,
+      nameService: ns,
+      occupied: occupiedTablesList(),
+    });
+  }
   if (!currentTargetTable || currentTargetTable === "NONE" || currentTargetTable === "LOBBY") {
     return res.json({
       success: false,
       activeTable: null,
       readyAt: null,
+      occupied: occupiedTablesList(),
       message: "No active table currently entered by Playwright",
     });
   }
@@ -108,14 +191,20 @@ app.get("/api/get-active-table", (req, res) => {
     success: true,
     activeTable: currentTargetTable,
     readyAt: activeTableReadyAt || null,
+    occupied: occupiedTablesList(),
   });
 });
 
 app.post("/api/request-session-restart", (req, res) => {
-  console.log(`[API RESTART] Yêu cầu Playwright restart session (NS1)`);
-  io.emit("NS1_restart", { reason: "api_timeout_60s" });
-  io.emit("force_reenter_table", { reason: "api_timeout_60s" });
-  return res.json({ success: true });
+  const ns =
+    String(req.body?.nameService || "NS1").trim().toUpperCase() || "NS1";
+  console.log(`[API RESTART] Yêu cầu Playwright restart session (${ns})`);
+  io.emit(`${ns}_restart`, { reason: "api_timeout_60s", nameService: ns });
+  io.emit("force_reenter_table", {
+    reason: "api_timeout_60s",
+    nameService: ns,
+  });
+  return res.json({ success: true, nameService: ns });
 });
 
 app.post("/api/place-bet", (req, res) => {
@@ -124,7 +213,14 @@ app.post("/api/place-bet", (req, res) => {
     ? String(tableName).trim().toUpperCase()
     : currentTargetTable || null;
   const bet = betSide || side || "P";
-  if (!key || !currentTargetTable || key === "NONE" || key === "LOBBY") {
+  let ownerNs = null;
+  for (const [ns, info] of Object.entries(activeTablesByNs)) {
+    if (info?.tableName === key) {
+      ownerNs = ns;
+      break;
+    }
+  }
+  if (!key || key === "NONE" || key === "LOBBY" || !ownerNs) {
     console.log(`[API PLACE BET BLOCKED] Playwright chưa vào bàn — bỏ qua`);
     return res.status(409).json({
       success: false,
@@ -132,12 +228,17 @@ app.post("/api/place-bet", (req, res) => {
     });
   }
   console.log(
-    `[API PLACE BET] Bot Tele đặt cược bàn ${key} -> ${
+    `[API PLACE BET] Bot Tele đặt cược bàn ${key} (${ownerNs || "?"}) -> ${
       String(bet).toUpperCase().startsWith("B") ? "CÁI" : "CON"
     }`
   );
-  io.emit("place_bet", { tableName: key, betSide: bet, side: bet });
-  return res.json({ success: true, tableName: key, betSide: bet });
+  io.emit("place_bet", {
+    tableName: key,
+    betSide: bet,
+    side: bet,
+    nameService: ownerNs,
+  });
+  return res.json({ success: true, tableName: key, betSide: bet, nameService: ownerNs });
 });
 
 app.post("/api/notify-screenshot", (req, res) => {
@@ -211,7 +312,18 @@ io.on("connection", (socket) => {
   socket.on("notify_active_table", (payload) => {
     const tableName = payload && payload.tableName;
     const nameService = payload && payload.nameService;
-    if (tableName) setActiveTable(tableName, nameService || "SOCKET");
+    if (!tableName) return;
+    try {
+      setActiveTable(tableName, nameService || "SOCKET");
+    } catch (e) {
+      if (e.code === "TABLE_OCCUPIED") {
+        console.log(
+          `[SOCKET CONFLICT] ${nameService} ${e.tableName} đã có ${e.occupiedBy}`
+        );
+      } else {
+        console.error("[SOCKET notify_active_table]", e.message);
+      }
+    }
   });
 });
 

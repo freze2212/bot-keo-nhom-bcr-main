@@ -8,7 +8,20 @@ const fs = require("fs").promises;
 
 const { request, imageCapcha, helper, screenshotHelper } = require("../utilities");
 const axios = require("axios");
-const { account_1: account } = require("./account.puppeteer");
+const accounts = require("./account.puppeteer");
+const accountIdx = Math.min(
+  5,
+  Math.max(1, Number(process.env.ACCOUNT_INDEX || 1) || 1)
+);
+const account = accounts[`account_${accountIdx}`] || accounts.account_1;
+console.log(
+  `[ACCOUNT] index=${accountIdx} NS=${account.nameServiceSocket} user=${account.username_game}`
+);
+const {
+  listTablesFromFrame,
+  clickTableByCode,
+  normTableCode,
+} = require("../utilities/lobbyTables");
 
 let isCollecting = false;
 let socket;
@@ -706,6 +719,21 @@ async function clearActiveTableOnServer() {
   }
 }
 
+async function fetchOccupiedTableCodes() {
+  try {
+    const serverPort = process.env.SERVER_PORT || 3201;
+    const res = await axios.get(
+      `http://localhost:${serverPort}/api/occupied-tables`,
+      { timeout: 3000 }
+    );
+    return (res.data?.tables || []).map((t) =>
+      String(t).trim().toUpperCase()
+    );
+  } catch (_) {
+    return [];
+  }
+}
+
 async function notifyActiveTableToServer(tableName) {
   const key = String(tableName || "").trim().toUpperCase();
   if (!key || key === "NONE" || key === "LOBBY") return false;
@@ -743,6 +771,18 @@ async function notifyActiveTableToServer(tableName) {
     }
     return true;
   } catch (e) {
+    const status = e.response?.status;
+    const data = e.response?.data || {};
+    if (status === 409 || data.code === "TABLE_OCCUPIED") {
+      await helper.appendToLog(
+        `⚠️ [TABLE CONFLICT] ${key} đã có ${data.occupiedBy} — phải đổi bàn`,
+        logsNameProgress
+      );
+      console.log(
+        `[TABLE CONFLICT] ${key} occupied by ${data.occupiedBy}`
+      );
+      return { conflict: true, occupiedBy: data.occupiedBy, tableName: key };
+    }
     await helper.appendToLog(
       `⚠️ [API NOTIFY ERROR] ${e.message}`,
       logsNameProgress
@@ -1193,11 +1233,22 @@ async function isReallyInTableRoom() {
     page.frame({ name: "iframeGameTable" }),
     page.frame({ name: "iframeGame" }),
     gameCurrentFrame,
+    gameHallFrame,
     seamlessFrame,
     page,
+    ...(page && typeof page.frames === "function" ? page.frames() : []),
   ].filter(Boolean);
+  const seen = new Set();
   for (const frame of frames) {
     if (!frame || (typeof frame.isClosed === "function" && frame.isClosed())) continue;
+    let key = "";
+    try {
+      key = frame.url() || String(Math.random());
+    } catch (_) {
+      key = String(Math.random());
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
     const ok = await withTimeout(
       frame
         .evaluate(() => {
@@ -1208,7 +1259,15 @@ async function isReallyInTableRoom() {
           const player =
             document.querySelector(".zone_bet_player") ||
             document.getElementById("playerOdds");
-          return !!(dt || banker || player);
+          const goHome =
+            document.querySelector("button#goHome2") ||
+            document.querySelector("button#goHome") ||
+            document.querySelector(".goHome");
+          const hallList = document.querySelector(
+            ".vue-recycle-scroller__item-view"
+          );
+          // Trong bàn: có zone/odds/currentGameTable, hoặc có goHome mà không còn list sảnh
+          return !!(dt || banker || player || (goHome && !hallList));
         })
         .catch(() => false),
       3500,
@@ -1217,6 +1276,30 @@ async function isReallyInTableRoom() {
     if (ok) return true;
   }
   return false;
+}
+
+/** Đã vào phòng? — nới hơn isReallyInTableRoom (cookie / #currentGameTable / iframe bàn) */
+async function probeEnteredTable(fallbackCode = null) {
+  const detected = await detectCurrentTableInRoom().catch(() => null);
+  const cookie = await withTimeout(detectTableFromCookie(), 2000, null);
+  const inDom = await isReallyInTableRoom().catch(() => false);
+  let hasTableFrame = false;
+  try {
+    hasTableFrame = (page.frames() || []).some((f) => {
+      try {
+        const n = (f.name && f.name()) || "";
+        const u = (f.url && f.url()) || "";
+        return /iframeGameTable|GameTable/i.test(n + u);
+      } catch (_) {
+        return false;
+      }
+    });
+  } catch (_) {}
+  const table =
+    detected || cookie || (fallbackCode ? normTableCode(fallbackCode) : null);
+  // Có mã bàn (detect/cookie) hoặc DOM bet zone, hoặc iframe bàn + mã click
+  const inRoom = !!(inDom || detected || cookie || (hasTableFrame && table));
+  return { inRoom, table: table || null, inDom, detected, cookie, hasTableFrame };
 }
 
 /** Click .notification_closeBtn sau khi vào bàn */
@@ -1788,9 +1871,15 @@ async function enterTargetTable(gameHallFrame, tableName) {
     }
 
     let clickedTableCode = null;
+    // NS1 ưu tiên free[0], NS2 free[1]… — tránh 2 session cùng dãy C03→C04
+    const pickOffset = Math.max(0, accountIdx - 1);
 
     if (gameHallFrame) {
-      // Thử lại tối đa 12 lần: đóng popup trình duyệt → click bàn → kiểm tra vào phòng
+      const listedOnce = await listTablesFromFrame(gameHallFrame, { scrolls: 4 }).catch(
+        () => []
+      );
+
+      // Thử lại tối đa 12 lần: đóng popup → refresh occupied → click bàn lệch theo NS → kiểm tra vào phòng
       for (let attempt = 0; attempt < 12; attempt++) {
         console.log(`[ENTER] attempt ${attempt + 1}/12 — đóng popup rồi mới click bàn`);
         await dismissBrowserSupportModal().catch(() => {});
@@ -1804,57 +1893,101 @@ async function enterTargetTable(gameHallFrame, tableName) {
           continue;
         }
 
-        const tableClicked = await gameHallFrame.evaluate(() => {
-          const parseCode = (txt) => {
-            const t = String(txt || "");
-            const m1 = t.match(/Baccarat\s+(C\d+)/i);
-            if (m1) return m1[1].toUpperCase();
-            const m2 = t.match(/BTCB(\d+)/i);
-            if (m2) return `C${m2[1].padStart(2, "0")}`;
-            return null;
-          };
+        // Mỗi attempt lấy lại occupied (NS kia có thể vừa khóa bàn)
+        const occupied = await fetchOccupiedTableCodes();
+        const freeCodes = listedOnce
+          .map((t) => normTableCode(t.code))
+          .filter((c) => c && !occupied.includes(c));
+        console.log(
+          `[ENTER] DOM list=${listedOnce.length} free=${freeCodes.slice(0, 10).join(",") || "-"} occupied=${occupied.join(",") || "-"} offset=${pickOffset}`
+        );
 
-          const tableCards = Array.from(document.querySelectorAll(
-            ".vue-recycle-scroller__item-view, .table-item, div.relative.cursor-pointer, [class*='card']"
-          ));
+        const prefer = freeCodes.length
+          ? freeCodes[(attempt + pickOffset) % freeCodes.length]
+          : null;
 
-          if (tableCards.length > 0) {
-            const card = tableCards[Math.floor(Math.random() * Math.min(tableCards.length, 6))];
-            const code = parseCode(card.innerText || card.textContent || "");
-            const clickEvt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-            card.dispatchEvent(clickEvt);
-            if (card.click) card.click();
-            return { ok: true, table: code };
+        // Khóa bàn trước khi click — NS khác sẽ thấy occupied
+        if (prefer) {
+          const reserved = await notifyActiveTableToServer(prefer);
+          if (reserved && typeof reserved === "object" && reserved.conflict) {
+            console.log(
+              `[ENTER] skip ${prefer} — đang giữ bởi ${reserved.occupiedBy}`
+            );
+            await helper.delay(400);
+            continue;
           }
-
-          const allElems = Array.from(document.querySelectorAll("div, span, button, a"));
-          const baccaratElem = allElems.find((el) => {
-            const txt = (el.innerText || el.textContent || "").trim().toUpperCase();
-            return (txt.includes("BACCARAT C") || txt.includes("BTCB")) && txt.length < 80;
-          });
-
-          if (baccaratElem) {
-            const code = parseCode(baccaratElem.innerText || baccaratElem.textContent || "");
-            const clickEvt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-            baccaratElem.dispatchEvent(clickEvt);
-            if (baccaratElem.click) baccaratElem.click();
-            return { ok: true, table: code };
+          if (!reserved) {
+            console.log(`[ENTER] reserve ${prefer} thất bại — thử bàn khác`);
+            await helper.delay(400);
+            continue;
           }
-          return { ok: false, table: null };
-        }).catch(() => ({ ok: false, table: null }));
+          console.log(`[ENTER] reserved ${prefer} cho ${account.nameServiceSocket}`);
+        }
+
+        let tableClicked = { ok: false, table: null };
+        if (prefer) {
+          tableClicked = await clickTableByCode(gameHallFrame, prefer, {
+            allowFallback: false,
+          }).catch(() => ({ ok: false }));
+        }
+        if (!tableClicked?.ok) {
+          tableClicked = await gameHallFrame
+            .evaluate((avoid) => {
+              const parseCode = (txt) => {
+                const t = String(txt || "");
+                const m1 = t.match(/Baccarat\s+(C\d+)/i);
+                if (m1) return m1[1].toUpperCase();
+                const m2 = t.match(/BTCB(\d+)/i);
+                if (m2) return `C${m2[1].padStart(2, "0")}`;
+                return null;
+              };
+              const avoidSet = new Set(
+                (avoid || []).map((x) => String(x).toUpperCase())
+              );
+              const tableCards = Array.from(
+                document.querySelectorAll(
+                  ".vue-recycle-scroller__item-view, .table-item, div.relative.cursor-pointer, [class*='card']"
+                )
+              );
+              const pool = tableCards.filter((card) => {
+                const code = parseCode(card.innerText || card.textContent || "");
+                return code && !avoidSet.has(code);
+              });
+              const use =
+                pool.length > 0
+                  ? pool[Math.floor(Math.random() * Math.min(pool.length, 6))]
+                  : tableCards[
+                      Math.floor(Math.random() * Math.min(tableCards.length || 1, 6))
+                    ];
+              if (!use) return { ok: false, table: null };
+              const code = parseCode(use.innerText || use.textContent || "");
+              const clickEvt = new MouseEvent("click", {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+              });
+              use.dispatchEvent(clickEvt);
+              if (use.click) use.click();
+              return { ok: true, table: code };
+            }, occupied)
+            .catch(() => ({ ok: false, table: null }));
+        }
 
         if (tableClicked && tableClicked.ok) {
           clickedSuccess = true;
-          clickedTableCode = tableClicked.table || null;
+          clickedTableCode = tableClicked.table
+            ? normTableCode(tableClicked.table)
+            : prefer;
           await helper.appendToLog(
             `✅ [CLICK TABLE SUCCESS] click card ${clickedTableCode || "?"} (lần ${attempt + 1})!`,
             logsNameProgress
           );
           console.log(`✅ [CLICK TABLE] ${clickedTableCode || "?"}`);
 
-          // Chờ vào phòng thật — CHƯA notify / CHƯA refresh
-          await helper.delay(4500);
+          // Chờ vào phòng thật
+          await helper.delay(5000);
           await dismissBrowserSupportModal().catch(() => {});
+          await clickNotificationCloseBtn().catch(() => {});
           // Bind iframe bàn nếu vừa xuất hiện
           try {
             const tEl =
@@ -1863,12 +1996,28 @@ async function enterTargetTable(gameHallFrame, tableName) {
                 (await seamlessFrame.$("iframe#iframeGameTable, iframe[name='iframeGameTable']").catch(() => null)));
             if (tEl) gameCurrentFrame = await tEl.contentFrame().catch(() => null);
           } catch (_) {}
-          if (await isReallyInTableRoom()) {
-            console.log(`✅ [IN ROOM] Đã vào bàn thật sau click ${clickedTableCode || "?"}`);
+          for (const f of page.frames()) {
+            const n = (f.name && f.name()) || "";
+            const u = (f.url && f.url()) || "";
+            if (/iframeGameTable|GameTable/i.test(n + u)) {
+              gameCurrentFrame = f;
+              break;
+            }
+          }
+          const probe = await probeEnteredTable(clickedTableCode);
+          if (probe.inRoom) {
+            if (probe.table) clickedTableCode = probe.table;
+            console.log(
+              `✅ [IN ROOM] Đã vào bàn thật sau click ${clickedTableCode || "?"} (detect=${probe.detected} cookie=${probe.cookie} frame=${probe.hasTableFrame})`
+            );
             break;
           }
-          console.log(`[ENTER] Click rồi nhưng chưa vào phòng (popup?) — thử lại...`);
+          console.log(`[ENTER] Click rồi nhưng chưa vào phòng (popup?) — nhả khóa rồi thử lại...`);
           clickedSuccess = false;
+          await clearActiveTableOnServer().catch(() => {});
+        } else if (prefer) {
+          // Click fail — nhả bàn đã reserve
+          await clearActiveTableOnServer().catch(() => {});
         }
         await helper.delay(800);
       }
@@ -1896,32 +2045,33 @@ async function enterTargetTable(gameHallFrame, tableName) {
 
     // Chờ vào bàn + đọc mã — chỉ notify khi đã vào phòng thật
     let actualDetectedTable = null;
+    let probeFinal = { inRoom: false, table: null };
     for (let i = 0; i < 8; i++) {
       await helper.delay(800);
       await dismissBrowserSupportModal().catch(() => {});
       await closeInTableModals(gameCurrentFrame || gameHallFrame || page).catch(() => {});
       await clickNotificationCloseBtn().catch(() => {});
-      actualDetectedTable = await detectCurrentTableInRoom();
-      if (actualDetectedTable && (await isReallyInTableRoom())) break;
+      probeFinal = await probeEnteredTable(clickedTableCode);
+      actualDetectedTable = probeFinal.detected || probeFinal.table || null;
+      if (probeFinal.inRoom && actualDetectedTable) break;
       console.log(`[DETECT TABLE] retry ${i + 1}/8...`);
     }
 
-    const inRoom = await isReallyInTableRoom();
-    const cookieTable = await withTimeout(detectTableFromCookie(), 2000, null);
-    // detect/#currentGameTable hoặc cookie BTCBxx đủ coi là đã vào phòng
-    const reallyIn = !!(inRoom || actualDetectedTable || cookieTable);
+    const cookieTable = probeFinal.cookie || (await withTimeout(detectTableFromCookie(), 2000, null));
+    const reallyIn = !!(probeFinal.inRoom || actualDetectedTable || cookieTable);
     const finalTable =
       actualDetectedTable || clickedTableCode || cookieTable || null;
 
     if (!finalTable || !reallyIn) {
       console.log(
-        `⚠️ [CHƯA VÀO BÀN] detect=${actualDetectedTable} click=${clickedTableCode} inRoom=${inRoom} cookie=${cookieTable} — không notify bot`
+        `⚠️ [CHƯA VÀO BÀN] detect=${actualDetectedTable} click=${clickedTableCode} probeIn=${probeFinal.inRoom} cookie=${cookieTable} — không notify bot`
       );
       await helper.appendToLog(
-        `⚠️ [CHƯA VÀO BÀN] Popup/trình duyệt chặn — chưa báo bot. inRoom=${inRoom}`,
+        `⚠️ [CHƯA VÀO BÀN] Popup/trình duyệt chặn — chưa báo bot. inRoom=${probeFinal.inRoom}`,
         logsNameProgress
       );
       currentInTable = null;
+      await clearActiveTableOnServer().catch(() => {});
       return { success: false, reason: "not_in_table_room" };
     }
 
@@ -1934,7 +2084,46 @@ async function enterTargetTable(gameHallFrame, tableName) {
       logsNameProgress
     );
     const notified = await notifyActiveTableToServer(finalTable);
-    console.log(`[NOTIFY BOT] active_table=${finalTable} ok=${notified}`);
+    if (notified && typeof notified === "object" && notified.conflict) {
+      console.log(
+        `[CONFLICT] ${finalTable} trùng ${notified.occupiedBy} — goHome rồi chọn bàn khác`
+      );
+      await helper.appendToLog(
+        `⚠️ [CONFLICT] Out ${finalTable}, chọn bàn khác (đang giữ bởi ${notified.occupiedBy})`,
+        logsNameProgress
+      );
+      currentInTable = null;
+      sessionInTableReady = false;
+      // Về lobby
+      try {
+        for (const f of [page, seamlessFrame, gameHallFrame, gameCurrentFrame].filter(Boolean)) {
+          const ok = await f
+            .evaluate(() => {
+              const el =
+                document.querySelector("button#goHome2") ||
+                document.querySelector("button#goHome") ||
+                document.querySelector(".goHome");
+              if (el) {
+                el.click();
+                return true;
+              }
+              return false;
+            })
+            .catch(() => false);
+          if (ok) break;
+        }
+      } catch (_) {}
+      await helper.delay(4000);
+      // Rebind hall + thử lại (occupied đã có bàn kia)
+      try {
+        const hallEl = seamlessFrame
+          ? await seamlessFrame.$("iframe#iframeGameHall").catch(() => null)
+          : null;
+        if (hallEl) gameHallFrame = await hallEl.contentFrame().catch(() => null);
+      } catch (_) {}
+      return enterTargetTable(gameHallFrame, null);
+    }
+    console.log(`[NOTIFY BOT] active_table=${finalTable} ok=${!!notified}`);
 
     // Vào bàn XONG mới bấm btn_refresh ĐÚNG 1 LẦN
     await helper.delay(600);
@@ -2214,7 +2403,7 @@ async function captureTableRound(tableName, roundOptions = {}) {
         url: `/screenshots/${result.filename}`,
         roundNum: roundOptions.roundNum || null,
         resultWinner: roundOptions.resultWinner || null,
-        nameService: "NS1"
+        nameService: nameServiceSocket,
       }).catch(() => {});
     }
     return result;
@@ -2303,6 +2492,8 @@ socket.on(`${nameServiceSocket}_restart`, async (data) => {
 
 // Bot timeout 60s / out bàn → vào bàn mới (đè bàn cũ), không full reset nếu còn page
 socket.on("force_reenter_table", async (data) => {
+  const targetNs = data?.nameService ? String(data.nameService).trim().toUpperCase() : null;
+  if (targetNs && targetNs !== nameServiceSocket) return;
   try {
     await helper.appendToLog(
       `🔄 [FORCE RE-ENTER] ${JSON.stringify(data || {})} — vào bàn mới đè bàn cũ`,
@@ -2354,8 +2545,8 @@ socket.on("new_round_completed", async (data) => {
     logsNameProgress
   );
 
-  // NS1: đúng 1 capture / ván, gắn resultWinner = P/B/T API
-  if (nameServiceSocket === "NS1" && page && !page.isClosed()) {
+  // Đúng 1 capture / ván, gắn resultWinner = P/B/T API
+  if (page && !page.isClosed()) {
     try {
       // Chờ UI hiện điểm / mở bài (không cap quá sớm / lung tung)
       await helper.delay(1200);
@@ -2387,6 +2578,12 @@ socket.on("new_round_completed", async (data) => {
 
 socket.on("place_bet", async (data) => {
   const betSide = (data && (data.betSide || data.side)) || "P";
+  const targetNs = data?.nameService ? String(data.nameService).trim().toUpperCase() : null;
+  if (targetNs && targetNs !== nameServiceSocket) return;
+  const reqTable = data?.tableName
+    ? String(data.tableName).trim().toUpperCase()
+    : null;
+  if (reqTable && currentInTable && reqTable !== currentInTable) return;
 
   // Chưa vào bàn / chưa notify → xếp hàng, không bỏ mất lệnh
   if (
