@@ -965,6 +965,66 @@ def _is_two_two(seq):
     )
 
 
+def _run_length_pattern(seq):
+    """
+    Đọc nhịp cầu theo độ dài các dây liên tiếp, ví dụ 1-3-1-2.
+    Tìm nhịp cuối đã từng xuất hiện trong chính 20 tay rồi suy ra dây hiện tại
+    nên tiếp tục hay đổi cửa.
+    """
+    if len(seq) < 8:
+        return None
+    runs = []
+    for side in seq:
+        if runs and runs[-1]['side'] == side:
+            runs[-1]['length'] += 1
+        else:
+            runs.append({'side': side, 'length': 1})
+    if len(runs) < 5:
+        return None
+
+    completed = runs[:-1]
+    lengths = [r['length'] for r in completed]
+    current = runs[-1]
+    max_context = min(5, len(lengths) - 1)
+    for context_size in range(max_context, 1, -1):
+        needle = lengths[-context_size:]
+        targets = []
+        for i in range(0, len(lengths) - context_size):
+            if lengths[i:i + context_size] == needle:
+                target = lengths[i + context_size]
+                if 1 <= target <= 8:
+                    targets.append(target)
+        if not targets or len(set(targets)) != 1:
+            continue
+        target_length = targets[0]
+        if current['length'] > target_length:
+            continue
+        side = (
+            current['side']
+            if current['length'] < target_length
+            else ('P' if current['side'] == 'B' else 'B')
+        )
+        confidence = min(
+            0.90,
+            0.72 + context_size * 0.015 + min(len(targets), 3) * 0.02,
+        )
+        expanded = lengths + [target_length]
+        rhythm = needle + [target_length]
+        for period in range(2, min(6, len(expanded) // 2) + 1):
+            if expanded[-period:] == expanded[-2 * period:-period]:
+                rhythm = expanded[-period:]
+                break
+        return {
+            'side': side,
+            'confidence': round(confidence, 3),
+            'rhythm': rhythm,
+            'target_length': target_length,
+            'current_length': current['length'],
+            'matches': len(targets),
+        }
+    return None
+
+
 def _pattern_next(seq, size):
     if len(seq) < size * 2:
         return None
@@ -1067,6 +1127,13 @@ def decide_road_signal(payload):
         nxt = 'P' if seq[-1] == 'B' else 'B'
         scores[nxt] += 1.5
         reasons.append(f'2-2→{nxt}+1.5')
+
+    rhythm = _run_length_pattern(seq)
+    if rhythm and rhythm.get('side') in ('B', 'P'):
+        rhythm_side = rhythm['side']
+        scores[rhythm_side] += 1.8
+        rhythm_name = '-'.join(str(x) for x in rhythm['rhythm'])
+        reasons.append(f'nhịp{rhythm_name}→{rhythm_side}+1.8')
 
     for size in (2, 3, 4):
         nxt = _pattern_next(seq, size)
@@ -1189,6 +1256,7 @@ def analyze_road_profile(payload, window=None):
 
     last, streak = _current_streak(seq)
     max_side, max_streak = _max_streak_in_seq(seq)
+    rhythm = _run_length_pattern(seq)
     lookback = seq[-18:] if len(seq) >= 18 else seq
     flips = sum(1 for i in range(1, len(lookback)) if lookback[i] != lookback[i - 1])
     chop_ratio = flips / max(1, len(lookback) - 1)
@@ -1205,6 +1273,15 @@ def analyze_road_profile(payload, window=None):
         side = 'P' if last == 'B' else 'B'
         confidence = 0.52 + min(0.18, (chop_ratio - 0.78) * 2.5)
         trend = f'cầu 1-1 đảo ({flips}/{len(lookback) - 1} lần lật)'
+    elif rhythm and rhythm.get('side') in ('B', 'P'):
+        road_type = 'RHYTHM'
+        side = rhythm['side']
+        confidence = float(rhythm['confidence'])
+        rhythm_name = '-'.join(str(x) for x in rhythm['rhythm'])
+        trend = (
+            f'nhịp {rhythm_name}; dây hiện tại '
+            f'{rhythm["current_length"]}/{rhythm["target_length"]}'
+        )
     elif streak >= 3 and last in ('B', 'P'):
         road_type = 'BET'
         side = last
@@ -2053,8 +2130,6 @@ async def daily_schedule(client, group):
 
             active = get_active_table_api()
             if not active:
-                if globals().get('_system_paused'):
-                    last_announced_table = None
                 await asyncio.sleep(1)
                 continue
 
@@ -2144,7 +2219,6 @@ async def daily_schedule(client, group):
                         "[WAIT API] Mất bàn / hệ thống đang recover — dừng hô",
                         flush=True,
                     )
-                    last_announced_table = None
                     signal_is_fresh = False
                     break
                 before_payload = await asyncio.to_thread(get_table_by_name_api, target_table)
@@ -2154,37 +2228,24 @@ async def daily_schedule(client, group):
                 profile = analyze_road_profile(before_payload)
                 road_profile_cache[target_table] = profile
                 if not profile.get('ready'):
-                    enough_hands = int(profile.get('hand_count') or 0) >= ROAD_ANALYSIS_MIN_BP
-                    if enough_hands:
-                        if time.time() - last_road_log_at >= 8:
-                            last_road_log_at = time.time()
-                            print(
-                                f"[PHÂN TÍCH CẦU] {target_table} không đạt chuẩn "
-                                f"type={profile.get('road_type')} "
-                                f"conf={profile.get('confidence')} — đổi ngay sang bàn tốt hơn",
-                                flush=True,
-                            )
-                        await asyncio.to_thread(
-                            request_change_table_api,
-                            target_table,
-                            profile.get('reason') or 'cầu xấu',
-                        )
-                        last_announced_table = None
-                        road_profile_cache.pop(target_table, None)
-                        signal_is_fresh = False
-                        await asyncio.sleep(3)
-                        break
-                    if time.time() - last_road_log_at >= 12:
+                    if time.time() - last_road_log_at >= 8:
                         last_road_log_at = time.time()
                         print(
-                            f"[PHÂN TÍCH CẦU] {target_table} chưa sẵn sàng — "
+                            f"[PHÂN TÍCH CẦU] {target_table} không đạt chuẩn "
                             f"type={profile.get('road_type')} "
                             f"({profile.get('hand_count')}/{ROAD_ANALYSIS_MIN_BP}) "
-                            f"| {profile.get('reason')}",
+                            f"conf={profile.get('confidence')} — đổi ngay",
                             flush=True,
                         )
+                    await asyncio.to_thread(
+                        request_change_table_api,
+                        target_table,
+                        profile.get('reason') or 'cầu chưa đạt chuẩn',
+                    )
+                    road_profile_cache.pop(target_table, None)
+                    signal_is_fresh = False
                     await asyncio.sleep(2)
-                    continue
+                    break
                 # Hô theo cửa cầu đẹp đã chốt (ưu tiên profile.side)
                 if road_analysis_stamp is not None and before_stamp is not None:
                     try:

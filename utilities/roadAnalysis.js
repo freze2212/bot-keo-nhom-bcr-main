@@ -85,6 +85,68 @@ function isTwoTwo(seq) {
   );
 }
 
+function runLengthPattern(seq) {
+  if (!Array.isArray(seq) || seq.length < 8) return null;
+  const runs = [];
+  for (const side of seq) {
+    const last = runs[runs.length - 1];
+    if (last && last.side === side) last.length += 1;
+    else runs.push({ side, length: 1 });
+  }
+  if (runs.length < 5) return null;
+
+  const completed = runs.slice(0, -1);
+  const lengths = completed.map((r) => r.length);
+  const current = runs[runs.length - 1];
+  const maxContext = Math.min(5, lengths.length - 1);
+  for (let contextSize = maxContext; contextSize >= 2; contextSize--) {
+    const needle = lengths.slice(-contextSize);
+    const targets = [];
+    for (let i = 0; i < lengths.length - contextSize; i++) {
+      const same = needle.every((n, j) => lengths[i + j] === n);
+      if (!same) continue;
+      const target = lengths[i + contextSize];
+      if (target >= 1 && target <= 8) targets.push(target);
+    }
+    if (!targets.length || new Set(targets).size !== 1) continue;
+    const targetLength = targets[0];
+    if (current.length > targetLength) continue;
+    const side =
+      current.length < targetLength
+        ? current.side
+        : current.side === "B"
+          ? "P"
+          : "B";
+    const confidence = Math.min(
+      0.9,
+      0.72 + contextSize * 0.015 + Math.min(targets.length, 3) * 0.02
+    );
+    const expanded = [...lengths, targetLength];
+    let rhythm = [...needle, targetLength];
+    for (
+      let period = 2;
+      period <= Math.min(6, Math.floor(expanded.length / 2));
+      period++
+    ) {
+      const latest = expanded.slice(-period);
+      const previous = expanded.slice(-period * 2, -period);
+      if (latest.every((n, i) => previous[i] === n)) {
+        rhythm = latest;
+        break;
+      }
+    }
+    return {
+      side,
+      confidence: Math.round(confidence * 1000) / 1000,
+      rhythm,
+      targetLength,
+      currentLength: current.length,
+      matches: targets.length,
+    };
+  }
+  return null;
+}
+
 function analyzeRoadProfile(totalRound, window) {
   const win = Number(window || ROAD_ANALYSIS_WINDOW) || 20;
   const seqAll = extractBpSequence(totalRound, Math.max(win, 48));
@@ -120,6 +182,7 @@ function analyzeRoadProfile(totalRound, window) {
 
   const { side: last, n: streak } = currentStreak(seq);
   const { side: maxSide, n: maxStreak } = maxStreakInSeq(seq);
+  const rhythm = runLengthPattern(seq);
   const lookback = seq.length >= 18 ? seq.slice(-18) : seq;
   let flips = 0;
   for (let i = 1; i < lookback.length; i++) {
@@ -138,6 +201,13 @@ function analyzeRoadProfile(totalRound, window) {
     side = last === "B" ? "P" : "B";
     confidence = 0.52 + Math.min(0.18, (chopRatio - 0.78) * 2.5);
     trend = `cầu 1-1 đảo (${flips}/${lookback.length - 1} lần lật)`;
+  } else if (rhythm && (rhythm.side === "B" || rhythm.side === "P")) {
+    roadType = "RHYTHM";
+    side = rhythm.side;
+    confidence = rhythm.confidence;
+    trend =
+      `nhịp ${rhythm.rhythm.join("-")}; dây hiện tại ` +
+      `${rhythm.currentLength}/${rhythm.targetLength}`;
   } else if (streak >= 3 && (last === "B" || last === "P")) {
     roadType = "BET";
     side = last;
@@ -177,7 +247,10 @@ function analyzeRoadProfile(totalRound, window) {
   // Score để xếp hạng bàn: ưu tiên BET/TWO_TWO > BIAS, conf cao, bệt dài
   let score = 0;
   if (ready) {
-    const typeBoost = { BET: 3.0, TWO_TWO: 2.6, BIAS: 2.0, PATTERN: 1.8 }[roadType] || 1.0;
+    const typeBoost =
+      { BET: 3.0, RHYTHM: 2.9, TWO_TWO: 2.6, BIAS: 2.0, PATTERN: 1.8 }[
+        roadType
+      ] || 1.0;
     score = typeBoost + confidence * 2 + Math.min(streak, 6) * 0.15;
   }
 
@@ -198,6 +271,7 @@ function analyzeRoadProfile(totalRound, window) {
     maxStreakSide: maxSide,
     chopRatio: Math.round(chopRatio * 1000) / 1000,
     reason,
+    rhythm,
     score: Math.round(score * 1000) / 1000,
   };
 }
@@ -208,5 +282,6 @@ module.exports = {
   ROAD_ANALYSIS_MIN_CONF,
   extractBpSequence,
   analyzeRoadProfile,
+  runLengthPattern,
   roadToSide,
 };
