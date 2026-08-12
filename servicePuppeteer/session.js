@@ -540,7 +540,8 @@ async function main() {
       logsNameProgress,
       page,
       passInputSelector,
-      password_game
+      password_game,
+      true
     );
 
     // Kiểm tra và xử lý Captcha nếu ô Captcha xuất hiện trên form đăng nhập
@@ -740,7 +741,7 @@ async function waitForFrame(parentFrame, selector, timeout = 60000) {
 }
 
 // Các hàm hỗ trợ
-async function fillInput(logsNameProgress, page, classElement, value) {
+async function fillInput(logsNameProgress, page, classElement, value, redact = false) {
   let retryCount = 0;
   const selectors = String(classElement).split(',').map(s => s.trim());
 
@@ -755,7 +756,7 @@ async function fillInput(logsNameProgress, page, classElement, value) {
           await page.keyboard.press("Backspace").catch(() => {});
           await inputField.type(value, { delay: 40 });
           await helper.appendToLog(
-            `NHẬP => ${value} THÀNH CÔNG (${sel})`,
+            `NHẬP => ${redact ? "***" : value} THÀNH CÔNG (${sel})`,
             logsNameProgress
           );
           return;
