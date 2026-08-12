@@ -465,10 +465,6 @@ app.post("/api/request-session-restart", async (req, res) => {
   console.log(`[API RESTART] Yêu cầu Playwright restart session (${ns})`);
   await announceSystemPause(ns, "api_timeout_60s");
   io.emit(`${ns}_restart`, { reason: "api_timeout_60s", nameService: ns });
-  io.emit("force_reenter_table", {
-    reason: "api_timeout_60s",
-    nameService: ns,
-  });
   return res.json({ success: true, nameService: ns, paused: true });
 });
 

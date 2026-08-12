@@ -87,7 +87,7 @@ process.once("exit", releaseAccountLock);
 /** Chống spawn nhiều Chromium: chỉ 1 main / 1 reset tại một thời điểm */
 let mainInFlight = null;
 let resetInFlight = null;
-let pendingResetAfterMain = false;
+let lifecycleGeneration = 0;
 let reloginNotBefore = 0;
 
 async function closeBrowserHard(reason = "") {
@@ -174,6 +174,7 @@ async function main() {
     console.log("[BROWSER] main() đang chạy — bỏ lệnh trùng (tránh 5 chrome-headless-shell)");
     return mainInFlight;
   }
+  const runGeneration = lifecycleGeneration;
   let shouldReset = false;
   const run = (async () => {
   try {
@@ -219,6 +220,10 @@ async function main() {
       if (!headless) launchOpts.args.push("--start-maximized");
     }
     browser = await launcher.launch(launchOpts);
+    if (runGeneration !== lifecycleGeneration) {
+      await closeBrowserHard("stale main generation");
+      throw new Error("MAIN_SUPERSEDED_BY_RESET");
+    }
     sessionRecovering = false;
     console.log(
       `[BROWSER] engine=${useFirefox ? "firefox" : "chromium"} headless=${headless} (1 instance)`
@@ -588,7 +593,10 @@ async function main() {
         logsNameProgress
       );
       await announceSystemAnalyzing("LOGIN_FAIL").catch(() => {});
-      return resetMain();
+      // Không gọi resetMain ngay bên trong main(): mainInFlight sẽ trỏ vào
+      // chính promise hiện tại và tạo vòng chờ lẫn nhau. Ném lỗi để main()
+      // kết thúc, nhả mutex rồi reset ở nhánh shouldReset phía dưới.
+      throw new Error("LOGIN_FAIL");
     }
 
     // Chờ đợi các element xuất hiện với timeout dài hơn
@@ -721,8 +729,7 @@ async function main() {
   }
   if (shouldReset) {
     if (resetInFlight) {
-      pendingResetAfterMain = true;
-      console.log("[RESET] main lỗi trong lúc đang reset — xếp hàng retry, không lồng deadlock");
+      console.log("[RESET] main cũ kết thúc trong lúc reset — reset hiện tại sẽ launch phiên mới");
     } else {
       await resetMain();
     }
@@ -1091,6 +1098,10 @@ function startActiveTableHeartbeat() {
       missDetect += 1;
       // Chỉ coi là out bàn sau ~1 phút miss liên tiếp khi chưa từng ready
       if (missDetect >= 8) {
+        if (resetInFlight || sessionRecovering || enterInFlight || tableChangeInFlight) {
+          console.log("[HEARTBEAT] đang reset/enter/đổi bàn — chưa chạy re-enter");
+          return;
+        }
         console.log(`⚠️ [OUT BÀN] miss=${missDetect} — vào bàn mới`);
         await helper.appendToLog(
           `⚠️ [OUT BÀN] Không thấy mã bàn (miss=${missDetect}) — vào bàn mới đè bàn cũ`,
@@ -2198,12 +2209,12 @@ async function executePlaceBet(betSide, requestedAmount) {
 }
 
 // Mở bàn chơi và tự động đọc mã bàn thực tế từ DOM
-async function enterTargetTable(gameHallFrame, tableName, isRetry = false) {
-  if (enterInFlight && !isRetry) {
+async function enterTargetTable(gameHallFrame, tableName) {
+  if (enterInFlight) {
     console.log("[ENTER] đang vào bàn — bỏ lệnh trùng");
     return { success: false, reason: "busy" };
   }
-  if (!isRetry) enterInFlight = true;
+  enterInFlight = true;
   try {
     // NẾU ĐÃ Ở TRONG BÀN CƯỢC THỰC TẾ -> NỔI KHÔNG OUT RA HAY VÀO LẠI!
     if (currentInTable && currentInTable !== "NONE" && currentInTable !== "LOBBY") {
@@ -2463,7 +2474,15 @@ async function enterTargetTable(gameHallFrame, tableName, isRetry = false) {
         logsNameProgress
       );
       await goHomeToLobby();
-      return enterTargetTable(gameHallFrame, null, true);
+      // Để finally nhả mutex trước, sau đó mới bắt đầu lượt chọn bàn mới.
+      setTimeout(() => {
+        if (!currentInTable && !sessionRecovering && !resetInFlight) {
+          enterTargetTable(gameHallFrame || seamlessFrame || page, null).catch((e) =>
+            console.error("[CONFLICT RE-ENTER]", e.message)
+          );
+        }
+      }, 250);
+      return { success: false, reason: "table_conflict" };
     }
     console.log(`[NOTIFY BOT] active_table=${finalTable} ok=${!!notified}`);
 
@@ -2480,7 +2499,7 @@ async function enterTargetTable(gameHallFrame, tableName, isRetry = false) {
     await helper.appendToLog(`Lỗi khi vào bàn: ${error.message}`, logsNameProgress);
     return { success: false, reason: error.message };
   } finally {
-    if (!isRetry) enterInFlight = null;
+    enterInFlight = null;
   }
 }
 
@@ -2887,13 +2906,17 @@ socket.on(`${nameServiceSocket}_restart`, async (data) => {
     logsNameProgress
   );
   console.log(`(SOCKET) - RESTART ${nameServiceSocket}`);
-  resetMain();
+  await resetMain().catch((e) => console.error("[SOCKET RESTART]", e.message));
 });
 
 // Bot timeout 60s / out bàn → vào bàn mới (đè bàn cũ), không full reset nếu còn page
 socket.on("force_reenter_table", async (data) => {
   const targetNs = data?.nameService ? String(data.nameService).trim().toUpperCase() : null;
   if (targetNs && targetNs !== nameServiceSocket) return;
+  if (resetInFlight || sessionRecovering || tableChangeInFlight) {
+    console.log("[FORCE RE-ENTER] đang reset/recover/đổi bàn — bỏ lệnh chồng");
+    return;
+  }
   try {
     await helper.appendToLog(
       `🔄 [FORCE RE-ENTER] ${JSON.stringify(data || {})} — vào bàn mới đè bàn cũ`,
@@ -2905,16 +2928,16 @@ socket.on("force_reenter_table", async (data) => {
     pendingPlaceBetAmount = null;
     await clearActiveTableOnServer();
     if (!page || page.isClosed()) {
-      resetMain();
+      await resetMain();
       return;
     }
     await enterTargetTable(gameHallFrame || seamlessFrame || page).catch(async (e) => {
       console.error("[FORCE RE-ENTER ERROR]", e.message);
-      resetMain();
+      await resetMain();
     });
   } catch (err) {
     console.error("[FORCE RE-ENTER FATAL]", err.message);
-    resetMain();
+    await resetMain().catch((e) => console.error("[FORCE RESET]", e.message));
   }
 });
 
@@ -3134,6 +3157,8 @@ async function resetMain() {
     return resetInFlight;
   }
   sessionRecovering = true;
+  const previousMain = mainInFlight;
+  lifecycleGeneration += 1;
   resetInFlight = (async () => {
     try {
       await clearListeners(page, [
@@ -3143,6 +3168,12 @@ async function resetMain() {
       ]);
       // Đóng browser NGAY — không delay 10s trước close (trước đây leak nhiều headless-shell)
       await closeBrowserHard("resetMain");
+      // Nếu reset tới đúng lúc main cũ đang launch/login, đợi nó thoát rồi
+      // đóng lần nữa để chắc chắn browser sinh muộn không bị bỏ orphan.
+      if (previousMain) {
+        await previousMain.catch(() => {});
+        await closeBrowserHard("after stale main");
+      }
       isCollecting = false;
       const cooldownMs = Math.max(2000, reloginNotBefore - Date.now());
       if (cooldownMs > 2000) {
@@ -3171,13 +3202,6 @@ async function resetMain() {
       });
     } finally {
       resetInFlight = null;
-      if (pendingResetAfterMain) {
-        pendingResetAfterMain = false;
-        console.log("[RESET] retry sau main fail trong reset trước");
-        setTimeout(() => {
-          resetMain().catch((e) => console.error("[RESET RETRY]", e.message));
-        }, 2500);
-      }
     }
   })();
   return resetInFlight;

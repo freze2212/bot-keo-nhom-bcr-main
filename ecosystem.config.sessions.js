@@ -30,6 +30,7 @@ function sessionApp(index) {
     min_uptime: "60s",
     max_restarts: 12,
     restart_delay: 12000,
+    kill_timeout: 10000,
     max_memory_restart: "700M",
     env: {
       ...sharedEnv,
