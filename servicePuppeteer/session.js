@@ -1,5 +1,7 @@
 const { chromium, firefox } = require("playwright");
 const path = require("path");
+const os = require("os");
+const fsSync = require("fs");
 const readline = require("readline");
 // Load .env với path tuyệt đối để đảm bảo tìm được file
 require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
@@ -31,16 +33,61 @@ let page;
 let seamlessFrame;
 let gameHallFrame;
 let gameCurrentFrame;
-let timeSendSessionDelay = Number(account.timeSendSessionDelay);
-let timeSendSessionNearest = helper.getCurrentTime().timeUnix;
+let lastCapturedSessionId = null;
+let lastSessionRequestBase = null;
+let lastHallIngestAt = 0;
+let lastHallShapeLogAt = 0;
 const username_game = account.username_game;
 const password_game = account.password_game;
 const nameServiceSocket = account.nameServiceSocket;
 const logsNameProgress = account.logsNameProgress;
+const accountLockPath = path.join(
+  os.tmpdir(),
+  `sexy-account-${String(username_game).toLowerCase().replace(/[^a-z0-9_-]/g, "_")}.lock`
+);
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function acquireAccountLock() {
+  try {
+    const oldPid = Number(fsSync.readFileSync(accountLockPath, "utf8").trim());
+    if (oldPid !== process.pid && isPidAlive(oldPid)) {
+      throw new Error(
+        `[ACCOUNT DUPLICATE] user=${username_game} đang được process PID ${oldPid} sử dụng`
+      );
+    }
+    fsSync.unlinkSync(accountLockPath);
+  } catch (error) {
+    if (error.code !== "ENOENT" && error.message?.startsWith("[ACCOUNT DUPLICATE]")) {
+      throw error;
+    }
+  }
+  fsSync.writeFileSync(accountLockPath, String(process.pid), { flag: "wx" });
+  console.log(`[ACCOUNT LOCK] user=${username_game} pid=${process.pid}`);
+}
+
+function releaseAccountLock() {
+  try {
+    const ownerPid = Number(fsSync.readFileSync(accountLockPath, "utf8").trim());
+    if (ownerPid === process.pid) fsSync.unlinkSync(accountLockPath);
+  } catch (_) {}
+}
+
+acquireAccountLock();
+process.once("exit", releaseAccountLock);
 
 /** Chống spawn nhiều Chromium: chỉ 1 main / 1 reset tại một thời điểm */
 let mainInFlight = null;
 let resetInFlight = null;
+let pendingResetAfterMain = false;
 
 async function closeBrowserHard(reason = "") {
   try {
@@ -63,10 +110,47 @@ async function closeBrowserHard(reason = "") {
   gameCurrentFrame = null;
 }
 
+let shutdownInFlight = false;
+async function gracefulShutdown(signal) {
+  if (shutdownInFlight) return;
+  shutdownInFlight = true;
+  console.log(`[SHUTDOWN] ${signal} — đóng browser và nhả account lock`);
+  await Promise.race([
+    closeBrowserHard(signal),
+    new Promise((resolve) => setTimeout(resolve, 1200)),
+  ]);
+  releaseAccountLock();
+  process.exit(0);
+}
+process.once("SIGINT", () => void gracefulShutdown("SIGINT"));
+process.once("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+
 // Khởi tạo socket
 socket = io(`${process.env.SERVER_HOSTNAME}:${process.env.SERVER_PORT}`);
-socket.on("connect", () => console.log("(SOCKET) Connecting"));
+socket.on("connect", () => {
+  console.log("(SOCKET) Connecting");
+  if (lastCapturedSessionId) {
+    sendSessionData(
+      lastCapturedSessionId,
+      nameServiceSocket,
+      lastSessionRequestBase,
+      true
+    ).catch(() => {});
+  }
+});
 socket.on("disconnect", () => console.log("(SOCKET) Disconnected"));
+// Hall API chỉ được poll khi server nhận heartbeat session liên tục.
+// Không phụ thuộc việc trang có tạo response chứa JSESSIONID mới hay không.
+setInterval(() => {
+  if (lastCapturedSessionId && socket?.connected) {
+    sendSessionData(
+      lastCapturedSessionId,
+      nameServiceSocket,
+      lastSessionRequestBase,
+      true
+    ).catch(() => {});
+  }
+}, 5000);
 
 // Đọc tín hiệu từ phím '!' gõ trực tiếp trong Terminal
 if (process.stdin.isTTY) {
@@ -134,6 +218,7 @@ async function main() {
       if (!headless) launchOpts.args.push("--start-maximized");
     }
     browser = await launcher.launch(launchOpts);
+    sessionRecovering = false;
     console.log(
       `[BROWSER] engine=${useFirefox ? "firefox" : "chromium"} headless=${headless} (1 instance)`
     );
@@ -247,23 +332,31 @@ async function main() {
     // Hàm thu thập response
     function startCollectingResponses(page, frames = []) {
       isCollecting = true;
-      console.log("[DEBUG] Starting to collect responses...");
+      const debugNetwork = process.env.DEBUG_NETWORK === "1";
+      if (debugNetwork) console.log("[DEBUG] Starting to collect responses...");
 
-      page.on("request", (req) => {
-        const url = req.url();
-        if (req.resourceType() === "xhr" || req.resourceType() === "fetch") {
-          console.log(`📡 [NETWORK REQUEST] ${req.method()} -> ${url}`);
-          if (req.postData()) {
-            console.log(`   └─ PAYLOAD: ${req.postData().slice(0, 300)}`);
+      if (debugNetwork) {
+        page.on("request", (req) => {
+          const url = req.url();
+          if (req.resourceType() === "xhr" || req.resourceType() === "fetch") {
+            console.log(`📡 [NETWORK REQUEST] ${req.method()} -> ${url}`);
+            if (req.postData()) {
+              console.log(`   └─ PAYLOAD: ${req.postData().slice(0, 300)}`);
+            }
           }
-        }
-      });
+        });
+      }
 
       const handleResponse = async (response) => {
         try {
           const url = response.url();
           const status = response.status();
-          if (url.includes("bet") || url.includes("settle") || url.includes("transaction") || url.includes("balance") || url.includes("Game") || url.includes("road") || url.includes("info")) {
+          if (
+            debugNetwork &&
+            (url.includes("bet") || url.includes("settle") ||
+              url.includes("transaction") || url.includes("balance") ||
+              url.includes("Game") || url.includes("road") || url.includes("info"))
+          ) {
             console.log(`📥 [NETWORK RESPONSE ${status}] ${url}`);
             try {
               const body = await response.text();
@@ -272,22 +365,93 @@ async function main() {
               }
             } catch (e) {}
           }
+          if (
+            status === 200 &&
+            /\/player\/query\/(queryInitWebGameHall|queryWebGameHallInformation|queryWebGameHallRoad)/i.test(url) &&
+            Date.now() - lastHallIngestAt >= 1000
+          ) {
+            try {
+              let hallData = await response.json();
+              if (typeof hallData === "string") {
+                try {
+                  hallData = JSON.parse(hallData);
+                } catch (_) {}
+              }
+              const tableItems =
+                hallData?.tableItems ||
+                hallData?.data?.tableItems ||
+                hallData?.result?.tableItems;
+              if (Array.isArray(tableItems) && tableItems.length) {
+                lastHallIngestAt = Date.now();
+                const serverPort = process.env.SERVER_PORT || 3201;
+                await axios.post(
+                  `http://localhost:${serverPort}/api/ingest-hall-data`,
+                  {
+                    nameService: nameServiceSocket,
+                    tableItems,
+                  },
+                  { timeout: 15000, maxBodyLength: Infinity }
+                );
+                console.log(
+                  `[HALL FORWARD] ${nameServiceSocket} tables=${tableItems.length}`
+                );
+              } else if (
+                debugNetwork &&
+                Date.now() - lastHallShapeLogAt > 10000
+              ) {
+                lastHallShapeLogAt = Date.now();
+                console.log(
+                  `[HALL RESPONSE NO TABLES] ${nameServiceSocket} url=${url} ` +
+                  `type=${typeof hallData} keys=${
+                    hallData && typeof hallData === "object"
+                      ? Object.keys(hallData).join(",")
+                      : "-"
+                  }`
+                );
+              }
+            } catch (e) {
+              if (
+                debugNetwork &&
+                Date.now() - lastHallShapeLogAt > 10000
+              ) {
+                lastHallShapeLogAt = Date.now();
+                console.log(`[HALL FORWARD SKIP] ${nameServiceSocket}: ${e.message}`);
+              }
+            }
+          }
         } catch (e) {}
 
         const resSession = await request.CollectingResponseSessionV2(
           response,
           isCollecting
         );
-        const timeUnixCurrent = helper.getCurrentTime().timeUnix;
-
         if (
           typeof resSession === "string" &&
-          /^[a-zA-Z0-9]+$/.test(resSession) &&
-          timeUnixCurrent > timeSendSessionNearest + timeSendSessionDelay
+          /^[a-zA-Z0-9]+$/.test(resSession)
         ) {
-          timeSendSessionNearest = timeUnixCurrent;
-          console.log(`[DEBUG] Sending session: ${resSession}`);
-          sendSessionData(resSession, nameServiceSocket);
+          const previousSessionId = lastCapturedSessionId;
+          const previousBase = lastSessionRequestBase;
+          let nextBase = previousBase;
+          try {
+            const responseUrl = new URL(response.url());
+            if (/\/player\/query\//i.test(responseUrl.pathname)) {
+              nextBase =
+                `${responseUrl.origin}/player/query/` +
+                "queryInitWebGameHall;jsessionid=";
+            }
+          } catch (_) {}
+          lastCapturedSessionId = resSession;
+          lastSessionRequestBase = nextBase;
+          if (
+            previousSessionId !== resSession ||
+            previousBase !== nextBase
+          ) {
+            sendSessionData(
+              resSession,
+              nameServiceSocket,
+              nextBase
+            );
+          }
         }
       };
 
@@ -295,13 +459,19 @@ async function main() {
       frames.forEach((frame) => {
         // if (frame && typeof frame.on === 'function') frame.on('response', handleResponse);
         if (frame && typeof frame.on === "function") {
-          console.log("[DEBUG] Adding response listener to frame");
+          if (debugNetwork) console.log("[DEBUG] Adding response listener to frame");
           frame.on("response", handleResponse);
         }
       });
 
-      console.log("[DEBUG] Response listeners added to page and frames");
+      if (debugNetwork) {
+        console.log("[DEBUG] Response listeners added to page and frames");
+      }
     }
+
+    // Bật từ trước khi goto/login để không bỏ lỡ JSESSIONID và JSON Hall.
+    // page.on('response') nhận response của cả iframe tạo về sau.
+    startCollectingResponses(page);
 
     // Kiểm tra DOMAIN trước khi goto
     const DOMAIN = process.env.DOMAIN;
@@ -317,6 +487,7 @@ async function main() {
     currentInTable = null;
     sessionInTableReady = false;
     pendingPlaceBetSide = null;
+    pendingPlaceBetAmount = null;
     await clearActiveTableOnServer();
 
     // Truy cập trang nhanh với domcontentloaded
@@ -414,6 +585,7 @@ async function main() {
         "❌ ĐĂNG NHẬP THẤT BẠI: Trang xuất hiện thông báo 'Vui lòng đăng nhập vào tài khoản trước'. Khởi động lại luồng login...",
         logsNameProgress
       );
+      await announceSystemAnalyzing("LOGIN_FAIL").catch(() => {});
       return resetMain();
     }
 
@@ -529,13 +701,6 @@ async function main() {
     gameHallFrameElement = await seamlessFrame.$("iframe#iframeGameHall");
     gameHallFrame = await gameHallFrameElement.contentFrame();
 
-    // lấy session
-    startCollectingResponses(page, [
-      seamlessFrame,
-      gameHallFrame,
-      gameCurrentFrame,
-    ]);
-
     // Dừng chu kỳ tự cuộn ngầm (startBaccaratCycle) để tránh bị giật trang
     // await startBaccaratCycle(gameHallFrame, gameCurrentFrame);
   } catch (error) {
@@ -553,7 +718,12 @@ async function main() {
     if (mainInFlight === run) mainInFlight = null;
   }
   if (shouldReset) {
-    await resetMain();
+    if (resetInFlight) {
+      pendingResetAfterMain = true;
+      console.log("[RESET] main lỗi trong lúc đang reset — xếp hàng retry, không lồng deadlock");
+    } else {
+      await resetMain();
+    }
   }
 }
 
@@ -690,23 +860,20 @@ let currentInTable = null; // Theo dõi tên bàn hiện tại đang mở
 let activeTableHeartbeatTimer = null;
 let placeBetInFlight = false;
 let pendingPlaceBetSide = null; // xếp hàng nếu bot hô trước khi vào bàn xong
+let pendingPlaceBetAmount = null;
 let sessionInTableReady = false; // true sau khi notify bàn thật
+let sessionRecovering = false; // overlay lỗi / hết phiên — cấm chụp, đang restart
+let lastPauseAnnounceAt = 0;
+let enterInFlight = null;
 
 async function clearActiveTableOnServer() {
-  try {
-    if (socket && socket.connected) {
-      socket.emit("notify_active_table", {
-        tableName: "NONE",
-        nameService: nameServiceSocket,
-      });
-    }
-  } catch (_) {}
   try {
     const serverPort = process.env.SERVER_PORT || 3201;
     await axios.post(`http://localhost:${serverPort}/api/notify-active-table`, {
       tableName: "NONE",
       nameService: nameServiceSocket,
     });
+    sessionInTableReady = false;
     await helper.appendToLog(
       "🧹 [CLEAR] Đã xóa active_table cũ — chờ vào bàn rồi mới báo bot",
       logsNameProgress
@@ -734,18 +901,93 @@ async function fetchOccupiedTableCodes() {
   }
 }
 
+/** Chọn bàn cầu đẹp từ danh sách free (API server phân tích ≥20 tay). */
+async function pickBeautifulTableFromServer(freeCodes) {
+  try {
+    const serverPort = process.env.SERVER_PORT || 3201;
+    const res = await axios.post(
+      `http://localhost:${serverPort}/api/pick-beautiful-table`,
+      {
+        freeCodes: (freeCodes || []).map((c) => String(c).trim().toUpperCase()),
+        nameService: nameServiceSocket,
+      },
+      { timeout: 8000 }
+    );
+    const data = res.data || {};
+    if (data.success && data.tableName) {
+      return {
+        tableName: String(data.tableName).trim().toUpperCase(),
+        profile: data.profile || null,
+        ranked: data.ranked || [],
+      };
+    }
+    return { tableName: null, profile: null, ranked: data.ranked || [], message: data.message };
+  } catch (e) {
+    console.error(`[PICK BEAUTIFUL] lỗi API: ${e.message}`);
+    return { tableName: null, profile: null, ranked: [], message: e.message };
+  }
+}
+
+async function goHomeToLobby() {
+  try {
+    for (const f of [page, seamlessFrame, gameHallFrame, gameCurrentFrame].filter(Boolean)) {
+      const ok = await f
+        .evaluate(() => {
+          const el =
+            document.querySelector("button#goHome2") ||
+            document.querySelector("button#goHome") ||
+            document.querySelector(".goHome");
+          if (el) {
+            el.click();
+            return true;
+          }
+          return false;
+        })
+        .catch(() => false);
+      if (ok) break;
+    }
+  } catch (_) {}
+  currentInTable = null;
+  sessionInTableReady = false;
+  await clearActiveTableOnServer().catch(() => {});
+  await helper.delay(3500);
+  try {
+    const hallEl = seamlessFrame
+      ? await seamlessFrame.$("iframe#iframeGameHall").catch(() => null)
+      : null;
+    if (hallEl) gameHallFrame = await hallEl.contentFrame().catch(() => null);
+  } catch (_) {}
+}
+
+async function reserveTableOnServer(tableName) {
+  const key = String(tableName || "").trim().toUpperCase();
+  if (!key) return false;
+  try {
+    const serverPort = process.env.SERVER_PORT || 3201;
+    await axios.post(`http://localhost:${serverPort}/api/reserve-table`, {
+      tableName: key,
+      nameService: nameServiceSocket,
+    });
+    return true;
+  } catch (e) {
+    const status = e.response?.status;
+    const data = e.response?.data || {};
+    if (status === 409 || data.code === "TABLE_OCCUPIED") {
+      return {
+        conflict: true,
+        occupiedBy: data.occupiedBy,
+        tableName: key,
+      };
+    }
+    console.error(`[RESERVE TABLE ERROR] ${key}: ${e.message}`);
+    return false;
+  }
+}
+
 async function notifyActiveTableToServer(tableName) {
   const key = String(tableName || "").trim().toUpperCase();
   if (!key || key === "NONE" || key === "LOBBY") return false;
-
-  try {
-    if (socket && socket.connected) {
-      socket.emit("notify_active_table", {
-        tableName: key,
-        nameService: nameServiceSocket,
-      });
-    }
-  } catch (_) {}
+  const shouldLogReady = !sessionInTableReady;
 
   try {
     const serverPort = process.env.SERVER_PORT || 3201;
@@ -754,20 +996,25 @@ async function notifyActiveTableToServer(tableName) {
       nameService: nameServiceSocket,
     });
     sessionInTableReady = true;
-    console.log(`✅ [API NOTIFY] active_table=${key} → bot có thể hô`);
-    await helper.appendToLog(
-      `✅ [API NOTIFY] Đã vào bàn → báo bot hô: active_table=${key}`,
-      logsNameProgress
-    );
+    sessionRecovering = false;
+    if (shouldLogReady) {
+      console.log(`✅ [API NOTIFY] active_table=${key} → bot có thể hô`);
+      await helper.appendToLog(
+        `✅ [API NOTIFY] Đã vào bàn → báo bot hô: active_table=${key}`,
+        logsNameProgress
+      );
+    }
     // Nếu bot đã gửi place_bet sớm → đặt ngay 1 lần
     if (pendingPlaceBetSide) {
       const side = pendingPlaceBetSide;
+      const amount = pendingPlaceBetAmount;
       pendingPlaceBetSide = null;
+      pendingPlaceBetAmount = null;
       await helper.appendToLog(
-        `[AUTOBET] Chạy lệnh place_bet đang xếp hàng: ${side}`,
+        `[AUTOBET] Chạy lệnh place_bet đang xếp hàng: ${side} ${amount || ""}K`,
         logsNameProgress
       );
-      await executePlaceBet(side).catch(() => {});
+      await runPlaceBetCommand(side, amount).catch(() => {});
     }
     return true;
   } catch (e) {
@@ -794,43 +1041,21 @@ async function notifyActiveTableToServer(tableName) {
 function startActiveTableHeartbeat() {
   if (activeTableHeartbeatTimer) clearInterval(activeTableHeartbeatTimer);
   let missDetect = 0;
-  let reconnectSoftTries = 0;
+  let heartbeatBusy = false;
   activeTableHeartbeatTimer = setInterval(async () => {
+    if (heartbeatBusy) return;
+    heartbeatBusy = true;
     try {
       if (!page || page.isClosed()) return;
 
-      // Hết phiên / session expired → FULL RE-LOGIN (không chỉ lúc chụp ảnh)
-      if (await detectSessionExpired().catch(() => false)) {
-        console.log("❌ [SESSION EXPIRED] Dialog hết phiên — RESTART login ngay");
-        await helper.appendToLog(
-          "❌ [SESSION EXPIRED] Hội thoại đã kết thúc — TỰ ĐỘNG resetMain / re-login",
-          logsNameProgress
+      // Kick / hết phiên → out bàn + restart ngay (không chụp overlay)
+      const fatalUi = await detectFatalUiError().catch(() => null);
+      if (fatalUi === "SESSION_EXPIRED" || fatalUi === "PAGE_CLOSED") {
+        console.log(`❌ [KICK/SESSION] ${fatalUi} — restart ngay`);
+        recoverFromFatalUi(fatalUi).catch((e) =>
+          console.error("[RECOVER]", e.message)
         );
-        sessionInTableReady = false;
-        currentInTable = null;
-        await clearActiveTableOnServer().catch(() => {});
-        await resetMain();
         return;
-      }
-
-      // "Làm mới đường truyền" — soft refresh 1-2 lần, vẫn lỗi thì restart
-      if (await detectConnectionRefreshing().catch(() => false)) {
-        reconnectSoftTries += 1;
-        console.log(
-          `⚠️ [NET] Đang làm mới đường truyền (try=${reconnectSoftTries}) → btn_refresh`
-        );
-        await clickBtnRefresh().catch(() => {});
-        if (reconnectSoftTries >= 3) {
-          reconnectSoftTries = 0;
-          await helper.appendToLog(
-            "❌ [NET] Làm mới đường truyền kéo dài → RESET session",
-            logsNameProgress
-          );
-          await resetMain();
-          return;
-        }
-      } else {
-        reconnectSoftTries = 0;
       }
 
       const detected = await detectCurrentTableInRoom().catch(() => null);
@@ -867,70 +1092,174 @@ function startActiveTableHeartbeat() {
         currentInTable = null;
         missDetect = 0;
         await clearActiveTableOnServer();
-        await enterTargetTable(gameHallFrame || seamlessFrame || page).catch((e) => {
+        enterTargetTable(gameHallFrame || seamlessFrame || page).catch((e) => {
           console.error("[RE-ENTER ERROR]", e.message);
         });
       }
-    } catch (_) {}
-  }, 8000);
+    } catch (error) {
+      console.warn(`[HEARTBEAT ERROR] ${error.message}`);
+    } finally {
+      heartbeatBusy = false;
+    }
+  }, 4000);
 }
 
-/** Dialog: Hội thoại của bạn đã kết thúc / session expired */
+/** Dialog kick / hết phiên — quét mọi node text (overlay canvas vẫn có DOM text). */
 async function detectSessionExpired() {
+  const kickNeedles = [
+    "hội thoại của bạn đã kết thúc",
+    "session has expired",
+    "your session has expired",
+    "đăng nhập lại trò chơi",
+    "please log in to the game again",
+    "bạn đã liên tục đăng nhập",
+    "tự động đăng xuất",
+    "xin lỗi",
+    "logged on at another location",
+    "logged in at another location",
+    "logged off because you have logged on",
+    "logged off because you have logged in",
+    "another location",
+  ];
   const frames = [
-    page,
-    seamlessFrame,
     gameCurrentFrame,
+    seamlessFrame,
     gameHallFrame,
+    page,
     ...(page && typeof page.frames === "function" ? page.frames() : []),
   ].filter(Boolean);
   const seen = new Set();
   for (const f of frames) {
     if (!f || (typeof f.isClosed === "function" && f.isClosed())) continue;
-    let key = "";
-    try {
-      key = f.url ? f.url() : String(f);
-    } catch (_) {
-      key = Math.random().toString();
-    }
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const hit = await f
-      .evaluate(() => {
-        const t = ((document.body && document.body.innerText) || "").toLowerCase();
-        return (
-          t.includes("hội thoại của bạn đã kết thúc") ||
-          t.includes("session has expired") ||
-          t.includes("your session has expired") ||
-          t.includes("đăng nhập lại trò chơi") ||
-          t.includes("please log in to the game again")
+    if (seen.has(f)) continue;
+    seen.add(f);
+    const hit = await withTimeout(
+      f.evaluate((needles) => {
+        const norm = (s) =>
+          String(s || "")
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "");
+        const matchText = (raw) => {
+          const t = norm(raw);
+          if (!t) return false;
+          return needles.some((n) => t.includes(norm(n)));
+        };
+        if (matchText(document.documentElement?.innerText || "")) return true;
+        if (matchText(document.body?.innerText || "")) return true;
+        const nodes = document.querySelectorAll(
+          "div, span, p, h1, h2, h3, label, section, aside, button, .modal, .dialog, .van-dialog, .van-overlay"
         );
-      })
-      .catch(() => false);
+        for (const el of nodes) {
+          const txt = (el.innerText || el.textContent || "").trim();
+          if (!txt || txt.length > 240) continue;
+          try {
+            const st = window.getComputedStyle(el);
+            if (
+              st.display === "none" ||
+              st.visibility === "hidden" ||
+              Number(st.opacity) === 0
+            ) {
+              continue;
+            }
+          } catch (_) {}
+          if (matchText(txt)) return true;
+        }
+        return false;
+      }, kickNeedles).catch(() => false),
+      900,
+      false
+    );
     if (hit) return true;
   }
   return false;
 }
 
-/** Toast/banner: đang làm mới đường truyền */
+/** Toast/banner: đang làm mới đường truyền — chỉ bắt overlay ngắn, không quét cả trang */
 async function detectConnectionRefreshing() {
   const frames = [gameCurrentFrame, seamlessFrame, page].filter(Boolean);
   for (const f of frames) {
     if (!f || (typeof f.isClosed === "function" && f.isClosed())) continue;
-    const hit = await f
-      .evaluate(() => {
-        const t = ((document.body && document.body.innerText) || "").toLowerCase();
-        return (
-          t.includes("làm mới đường truyền") ||
-          t.includes("refreshing the connection") ||
-          t.includes("refreshing connection") ||
-          t.includes("đang kết nối lại")
+    const hit = await withTimeout(
+      f.evaluate(() => {
+        const needles = [
+          "làm mới đường truyền",
+          "refreshing the connection",
+          "refreshing connection",
+        ];
+        const nodes = Array.from(
+          document.querySelectorAll("div, span, p, section, aside")
         );
-      })
-      .catch(() => false);
+        for (const el of nodes) {
+          const style = window.getComputedStyle(el);
+          if (
+            style.display === "none" ||
+            style.visibility === "hidden" ||
+            Number(style.opacity) === 0
+          ) {
+            continue;
+          }
+          const t = (el.innerText || "").trim().toLowerCase();
+          if (!t || t.length > 90) continue;
+          if (needles.some((n) => t.includes(n))) return true;
+        }
+        return false;
+      }).catch(() => false),
+      900,
+      false
+    );
     if (hit) return true;
   }
   return false;
+}
+
+async function detectFatalUiError() {
+  if (!page || page.isClosed()) return "PAGE_CLOSED";
+  const expired = await detectSessionExpired().catch(() => false);
+  if (expired) return "SESSION_EXPIRED";
+  return null;
+}
+
+async function announceSystemAnalyzing(reason) {
+  const now = Date.now();
+  if (now - lastPauseAnnounceAt < 90000) {
+    console.log(`[PAUSE TELE] cooldown — skip (${reason})`);
+    return;
+  }
+  lastPauseAnnounceAt = now;
+  try {
+    const serverPort = process.env.SERVER_PORT || 3201;
+    await axios.post(
+      `http://localhost:${serverPort}/api/system-pause`,
+      { nameService: nameServiceSocket, reason: reason || "recover" },
+      { timeout: 4000 }
+    );
+    console.log(`[PAUSE TELE] đã báo nhóm ${nameServiceSocket} reason=${reason}`);
+  } catch (e) {
+    console.warn(`[PAUSE TELE] không gửi được: ${e.message}`);
+  }
+}
+
+async function recoverFromFatalUi(reason) {
+  if (sessionRecovering || resetInFlight) {
+    console.log(`[RECOVER] đang recover rồi (${reason}) — bỏ lệnh trùng`);
+    return resetInFlight;
+  }
+  sessionRecovering = true;
+  sessionInTableReady = false;
+  currentInTable = null;
+  pendingPlaceBetSide = null;
+  pendingPlaceBetAmount = null;
+  console.log(`❌ [FATAL UI] ${reason} — bỏ chụp, RESTART session`);
+  await helper.appendToLog(
+    `❌ [FATAL UI] ${reason} — không chụp overlay lỗi, TỰ ĐỘNG resetMain`,
+    logsNameProgress
+  );
+  await clearActiveTableOnServer().catch(() => {});
+  if (reason === "SESSION_EXPIRED") {
+    await announceSystemAnalyzing(reason).catch(() => {});
+  }
+  return resetMain();
 }
 
 // Quay về sảnh nếu đang ở trong bàn
@@ -1711,12 +2040,19 @@ async function waitBettingWindowOpen(timeoutMs = 20000) {
  * CÁI → .zone_bet_banker | CON → .zone_bet_player | xác nhận → .btn_confirm
  * Bước nào lag/không click được → bỏ qua ván đó (không spam).
  */
-async function executePlaceBet(betSide) {
+async function executePlaceBet(betSide, requestedAmount) {
   const sideNorm = String(betSide || "P").toUpperCase().startsWith("B") ? "B" : "P";
   const zoneSel = pickBetZoneSelector(sideNorm);
-  const chipAmount = Number(process.env.BET_AMOUNT || 50) || 50;
+  const chipAmount =
+    Number(requestedAmount) || Number(process.env.BET_AMOUNT || 50) || 50;
 
   try {
+    if (await detectSessionExpired().catch(() => false)) {
+      recoverFromFatalUi("SESSION_EXPIRED").catch((e) =>
+        console.error("[RECOVER]", e.message)
+      );
+      return { success: false, side: sideNorm, reason: "SESSION_EXPIRED", skipped: true };
+    }
     await dismissBetErrorToast().catch(() => {});
 
     console.log("[AUTOBET] Chờ 2s sau hô rồi đặt cược...");
@@ -1819,7 +2155,12 @@ async function executePlaceBet(betSide) {
 }
 
 // Mở bàn chơi và tự động đọc mã bàn thực tế từ DOM
-async function enterTargetTable(gameHallFrame, tableName) {
+async function enterTargetTable(gameHallFrame, tableName, isRetry = false) {
+  if (enterInFlight && !isRetry) {
+    console.log("[ENTER] đang vào bàn — bỏ lệnh trùng");
+    return { success: false, reason: "busy" };
+  }
+  if (!isRetry) enterInFlight = true;
   try {
     // NẾU ĐÃ Ở TRONG BÀN CƯỢC THỰC TẾ -> NỔI KHÔNG OUT RA HAY VÀO LẠI!
     if (currentInTable && currentInTable !== "NONE" && currentInTable !== "LOBBY") {
@@ -1875,13 +2216,13 @@ async function enterTargetTable(gameHallFrame, tableName) {
     const pickOffset = Math.max(0, accountIdx - 1);
 
     if (gameHallFrame) {
-      const listedOnce = await listTablesFromFrame(gameHallFrame, { scrolls: 4 }).catch(
+      let listedOnce = await listTablesFromFrame(gameHallFrame, { scrolls: 4 }).catch(
         () => []
       );
 
-      // Thử lại tối đa 12 lần: đóng popup → refresh occupied → click bàn lệch theo NS → kiểm tra vào phòng
-      for (let attempt = 0; attempt < 12; attempt++) {
-        console.log(`[ENTER] attempt ${attempt + 1}/12 — đóng popup rồi mới click bàn`);
+      // Thử lại tối đa 20 lần: đóng popup → chỉ click bàn cầu đẹp
+      for (let attempt = 0; attempt < 20; attempt++) {
+        console.log(`[ENTER] attempt ${attempt + 1}/20 — đóng popup rồi mới click bàn cầu đẹp`);
         await dismissBrowserSupportModal().catch(() => {});
         await helper.delay(300);
         await dismissBrowserSupportModal().catch(() => {});
@@ -1893,6 +2234,14 @@ async function enterTargetTable(gameHallFrame, tableName) {
           continue;
         }
 
+        // Refresh list DOM mỗi vài lần — bàn mới mở / đủ tay
+        if (attempt > 0 && attempt % 4 === 0) {
+          const relisted = await listTablesFromFrame(gameHallFrame, { scrolls: 4 }).catch(
+            () => []
+          );
+          if (relisted.length) listedOnce = relisted;
+        }
+
         // Mỗi attempt lấy lại occupied (NS kia có thể vừa khóa bàn)
         const occupied = await fetchOccupiedTableCodes();
         const freeCodes = listedOnce
@@ -1902,13 +2251,31 @@ async function enterTargetTable(gameHallFrame, tableName) {
           `[ENTER] DOM list=${listedOnce.length} free=${freeCodes.slice(0, 10).join(",") || "-"} occupied=${occupied.join(",") || "-"} offset=${pickOffset}`
         );
 
-        const prefer = freeCodes.length
-          ? freeCodes[(attempt + pickOffset) % freeCodes.length]
-          : null;
+        // Ưu tiên bàn chỉ định; không thì chỉ vào bàn cầu đẹp (≥20 tay, conf đủ)
+        let prefer = null;
+        if (tableName && String(tableName).trim()) {
+          const forced = normTableCode(tableName);
+          if (forced) prefer = forced;
+        } else {
+          const pick = await pickBeautifulTableFromServer(freeCodes);
+          prefer = pick.tableName || null;
+          if (prefer) {
+            console.log(
+              `[ENTER] cầu đẹp → ${prefer} type=${pick.profile?.roadType} ` +
+                `conf=${pick.profile?.confidence} seq=${pick.profile?.seqDisplay || "-"}`
+            );
+          } else {
+            console.log(
+              `[ENTER] chưa có bàn cầu đẹp — chờ quét lại (${pick.message || "—"})`
+            );
+            await helper.delay(1500);
+            continue;
+          }
+        }
 
         // Khóa bàn trước khi click — NS khác sẽ thấy occupied
         if (prefer) {
-          const reserved = await notifyActiveTableToServer(prefer);
+          const reserved = await reserveTableOnServer(prefer);
           if (reserved && typeof reserved === "object" && reserved.conflict) {
             console.log(
               `[ENTER] skip ${prefer} — đang giữ bởi ${reserved.occupiedBy}`
@@ -1930,47 +2297,11 @@ async function enterTargetTable(gameHallFrame, tableName) {
             allowFallback: false,
           }).catch(() => ({ ok: false }));
         }
+        // Không fallback random bàn xấu — chỉ vào bàn cầu đẹp đã chọn
         if (!tableClicked?.ok) {
-          tableClicked = await gameHallFrame
-            .evaluate((avoid) => {
-              const parseCode = (txt) => {
-                const t = String(txt || "");
-                const m1 = t.match(/Baccarat\s+(C\d+)/i);
-                if (m1) return m1[1].toUpperCase();
-                const m2 = t.match(/BTCB(\d+)/i);
-                if (m2) return `C${m2[1].padStart(2, "0")}`;
-                return null;
-              };
-              const avoidSet = new Set(
-                (avoid || []).map((x) => String(x).toUpperCase())
-              );
-              const tableCards = Array.from(
-                document.querySelectorAll(
-                  ".vue-recycle-scroller__item-view, .table-item, div.relative.cursor-pointer, [class*='card']"
-                )
-              );
-              const pool = tableCards.filter((card) => {
-                const code = parseCode(card.innerText || card.textContent || "");
-                return code && !avoidSet.has(code);
-              });
-              const use =
-                pool.length > 0
-                  ? pool[Math.floor(Math.random() * Math.min(pool.length, 6))]
-                  : tableCards[
-                      Math.floor(Math.random() * Math.min(tableCards.length || 1, 6))
-                    ];
-              if (!use) return { ok: false, table: null };
-              const code = parseCode(use.innerText || use.textContent || "");
-              const clickEvt = new MouseEvent("click", {
-                bubbles: true,
-                cancelable: true,
-                view: window,
-              });
-              use.dispatchEvent(clickEvt);
-              if (use.click) use.click();
-              return { ok: true, table: code };
-            }, occupied)
-            .catch(() => ({ ok: false, table: null }));
+          console.log(`[ENTER] click ${prefer || "?"} thất bại — thử bàn cầu đẹp khác`);
+          await helper.delay(800);
+          continue;
         }
 
         if (tableClicked && tableClicked.ok) {
@@ -2024,23 +2355,11 @@ async function enterTargetTable(gameHallFrame, tableName) {
     }
 
     if (!clickedSuccess && gameHallFrame) {
-      await dismissBrowserSupportModal().catch(() => {});
-      if (!(await isBrowserSupportModalVisible())) {
-        const fallbackSelectors = [
-          "div.relative.cursor-pointer",
-          ".vue-recycle-scroller__item-view",
-          ".table-item",
-          "div[class*='table']"
-        ];
-        for (const sel of fallbackSelectors) {
-          const el = await gameHallFrame.$(sel).catch(() => null);
-          if (el) {
-            await el.click({ force: true }).catch(() => {});
-            clickedSuccess = true;
-            break;
-          }
-        }
-      }
+      console.log(
+        "[ENTER] hết attempt — chưa click được bàn cầu đẹp (không fallback random)"
+      );
+      await clearActiveTableOnServer().catch(() => {});
+      return { success: false, reason: "no_beautiful_table" };
     }
 
     // Chờ vào bàn + đọc mã — chỉ notify khi đã vào phòng thật
@@ -2092,36 +2411,8 @@ async function enterTargetTable(gameHallFrame, tableName) {
         `⚠️ [CONFLICT] Out ${finalTable}, chọn bàn khác (đang giữ bởi ${notified.occupiedBy})`,
         logsNameProgress
       );
-      currentInTable = null;
-      sessionInTableReady = false;
-      // Về lobby
-      try {
-        for (const f of [page, seamlessFrame, gameHallFrame, gameCurrentFrame].filter(Boolean)) {
-          const ok = await f
-            .evaluate(() => {
-              const el =
-                document.querySelector("button#goHome2") ||
-                document.querySelector("button#goHome") ||
-                document.querySelector(".goHome");
-              if (el) {
-                el.click();
-                return true;
-              }
-              return false;
-            })
-            .catch(() => false);
-          if (ok) break;
-        }
-      } catch (_) {}
-      await helper.delay(4000);
-      // Rebind hall + thử lại (occupied đã có bàn kia)
-      try {
-        const hallEl = seamlessFrame
-          ? await seamlessFrame.$("iframe#iframeGameHall").catch(() => null)
-          : null;
-        if (hallEl) gameHallFrame = await hallEl.contentFrame().catch(() => null);
-      } catch (_) {}
-      return enterTargetTable(gameHallFrame, null);
+      await goHomeToLobby();
+      return enterTargetTable(gameHallFrame, null, true);
     }
     console.log(`[NOTIFY BOT] active_table=${finalTable} ok=${!!notified}`);
 
@@ -2137,6 +2428,8 @@ async function enterTargetTable(gameHallFrame, tableName) {
   } catch (error) {
     await helper.appendToLog(`Lỗi khi vào bàn: ${error.message}`, logsNameProgress);
     return { success: false, reason: error.message };
+  } finally {
+    if (!isRetry) enterInFlight = null;
   }
 }
 
@@ -2338,6 +2631,10 @@ let captureLockTimeout = null;
 
 // Chụp ảnh màn hình bàn cược
 async function captureTableRound(tableName, roundOptions = {}) {
+  if (sessionRecovering || resetInFlight) {
+    console.log(`[SCREENSHOT SKIP] đang recover — không chụp ${tableName}`);
+    return { success: false, reason: "RECOVERING" };
+  }
   // Nếu đang chụp — chờ lock tối đa 6s rồi mới bỏ (tránh bot nhận ảnh ảo)
   if (isCapturingScreenshot) {
     const waitUntil = Date.now() + 6000;
@@ -2354,6 +2651,10 @@ async function captureTableRound(tableName, roundOptions = {}) {
   captureLockTimeout = setTimeout(() => { isCapturingScreenshot = false; }, 15000);
 
   try {
+    if (!page || page.isClosed()) {
+      recoverFromFatalUi("PAGE_CLOSED").catch((e) => console.error("[RECOVER]", e.message));
+      return { success: false, reason: "PAGE_CLOSED" };
+    }
     if (!currentInTable || currentInTable === "NONE" || currentInTable === "LOBBY") {
       console.log(`[SCREENSHOT CANCELLED] Chưa ở trong bàn cược thực tế nào, hủy chụp!`);
       return { success: false, reason: "NOT_IN_TABLE" };
@@ -2361,18 +2662,17 @@ async function captureTableRound(tableName, roundOptions = {}) {
 
     const cleanTarget = String(tableName || currentInTable).trim().toUpperCase();
 
-    // Kiểm tra chính xác dialog hết phiên (cả body text, không chỉ class modal)
-    if (await detectSessionExpired().catch(() => false)) {
-      await helper.appendToLog(
-        "❌ [SESSION EXPIRED DETECTED] Hết phiên lúc capture — TỰ ĐỘNG RESET RE-LOGIN!",
-        logsNameProgress
-      );
-      await resetMain();
-      return { success: false, reason: "SESSION_EXPIRED" };
+    const fatalUi = await detectFatalUiError().catch(() => null);
+    if (fatalUi === "SESSION_EXPIRED" || fatalUi === "PAGE_CLOSED") {
+      recoverFromFatalUi(fatalUi).catch((e) => console.error("[RECOVER]", e.message));
+      return { success: false, reason: fatalUi };
     }
 
     // 2. Đảm bảo đóng/xoá mọi popup thông báo trước khi chụp ảnh
-    await closeAllModals(page).catch(() => {});
+    await Promise.race([
+      closeAllModals(page).catch(() => {}),
+      helper.delay(1200),
+    ]);
 
     await helper.appendToLog(
       `📸 Đang tiến hành chụp ảnh màn hình cho bàn ${cleanTarget}...`,
@@ -2387,6 +2687,8 @@ async function captureTableRound(tableName, roundOptions = {}) {
       shoeNum: roundOptions.shoeNum,
       isFullPage: false,
       pageObj: page,
+      // VPS CPU không hỗ trợ binary Sharp hiện tại; bỏ crop để tránh load/error mỗi ván.
+      trimBlack: false,
     });
 
     if (result.success) {
@@ -2395,16 +2697,35 @@ async function captureTableRound(tableName, roundOptions = {}) {
         logsNameProgress
       );
 
-      const serverPort = process.env.SERVER_PORT || process.env.PORT || 3201;
-      axios.post(`http://localhost:${serverPort}/api/notify-screenshot`, {
-        tableName: cleanTarget,
-        filename: result.filename,
-        filepath: result.filepath,
-        url: `/screenshots/${result.filename}`,
-        roundNum: roundOptions.roundNum || null,
-        resultWinner: roundOptions.resultWinner || null,
-        nameService: nameServiceSocket,
-      }).catch(() => {});
+      const isInitCapture = String(roundOptions.roundNum || "").startsWith("INIT_");
+      if (!isInitCapture) {
+        const serverPort = process.env.SERVER_PORT || process.env.PORT || 3201;
+        const notifyBody = {
+          tableName: cleanTarget,
+          filename: result.filename,
+          filepath: result.filepath,
+          url: `/screenshots/${result.filename}`,
+          roundNum: roundOptions.roundNum || null,
+          resultWinner: roundOptions.resultWinner || null,
+          nameService: nameServiceSocket,
+        };
+        let notifyError = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            await axios.post(
+              `http://localhost:${serverPort}/api/notify-screenshot`,
+              notifyBody,
+              { timeout: 5000 }
+            );
+            notifyError = null;
+            break;
+          } catch (error) {
+            notifyError = error;
+            if (attempt < 2) await helper.delay(250);
+          }
+        }
+        if (notifyError) throw notifyError;
+      }
     }
     return result;
   } catch (err) {
@@ -2421,12 +2742,12 @@ async function captureTableRound(tableName, roundOptions = {}) {
 // Vào ra bàn game baccarat (chu kỳ mặc định)
 async function playBaccaratLoop(gameHallFrame, gameCurrentFrame) {
   try {
-    await enterTargetTable(gameHallFrame, "C01");
+    await enterTargetTable(gameHallFrame, null);
     await gameHallFrame.hover(process.env.CLICK_IN_TABLE_GAME).catch(() => {});
     
     // Đợi 20s và chụp ảnh thử nghiệm
     await helper.delay(20000);
-    await captureTableRound("C01", { roundNum: "LOOP" });
+    await captureTableRound(currentInTable || "UNKNOWN", { roundNum: "LOOP" });
     
     await helper.delay(10000);
     await returnToHallIfNeeded(gameCurrentFrame);
@@ -2460,20 +2781,25 @@ async function startBaccaratCycle(gameHallFrame, gameCurrentFrame) {
   }
 }
 
-async function sendSessionData(sessionId, nameService) {
+async function sendSessionData(sessionId, nameService, uriRequestData, quiet = false) {
   if (socket && sessionId !== undefined) {
-    console.log(
-      `[SOCKET] Sending session: ${sessionId} to service: ${nameService}`
-    );
+    if (!quiet) {
+      console.log(
+        `[SOCKET] Sending session: ${sessionId} to service: ${nameService}`
+      );
+    }
     socket.emit("session", {
       sessionId,
       nameService,
       stampTime: helper.getCurrentTime().timeUnix,
+      uriRequestData: uriRequestData || undefined,
     });
-    await helper.appendToLog(
-      `(SOCKET) send server sessionId:: ${sessionId}`,
-      logsNameProgress
-    );
+    if (!quiet) {
+      await helper.appendToLog(
+        `(SOCKET) send server sessionId:: ${sessionId}`,
+        logsNameProgress
+      );
+    }
   } else {
     console.log(
       `[SOCKET] Cannot send session - socket: ${!!socket}, sessionId: ${sessionId}`
@@ -2502,6 +2828,7 @@ socket.on("force_reenter_table", async (data) => {
     sessionInTableReady = false;
     currentInTable = null;
     pendingPlaceBetSide = null;
+    pendingPlaceBetAmount = null;
     await clearActiveTableOnServer();
     if (!page || page.isClosed()) {
       resetMain();
@@ -2523,6 +2850,32 @@ let requestedTargetTable = null;
 socket.on("set_target_table", async (data) => {
   const { tableName } = data;
   if (tableName) requestedTargetTable = String(tableName).trim().toUpperCase();
+});
+
+socket.on("request_change_table", async (data) => {
+  const targetNs = data?.nameService
+    ? String(data.nameService).trim().toUpperCase()
+    : null;
+  if (targetNs && targetNs !== nameServiceSocket) return;
+  const reason = data?.reason || "cầu xấu";
+  const fromTable = data?.tableName
+    ? String(data.tableName).trim().toUpperCase()
+    : currentInTable;
+  console.log(
+    `[CHANGE TABLE] ${nameServiceSocket} out ${fromTable || "?"} — ${reason}`
+  );
+  await helper.appendToLog(
+    `🔄 [ĐỔI BÀN] Out ${fromTable || "?"} vì ${reason} — chọn bàn cầu đẹp khác`,
+    logsNameProgress
+  );
+  try {
+    await goHomeToLobby();
+    await enterTargetTable(gameHallFrame || seamlessFrame || page, null).catch(
+      (e) => console.error("[CHANGE TABLE ENTER]", e.message)
+    );
+  } catch (e) {
+    console.error("[CHANGE TABLE ERROR]", e.message);
+  }
 });
 
 let lastRoundCaptureAt = 0;
@@ -2548,20 +2901,14 @@ socket.on("new_round_completed", async (data) => {
   // Đúng 1 capture / ván, gắn resultWinner = P/B/T API
   if (page && !page.isClosed()) {
     try {
-      // Chờ UI hiện điểm / mở bài (không cap quá sớm / lung tung)
-      await helper.delay(1200);
-      const frames = [gameCurrentFrame, seamlessFrame, page].filter(Boolean);
-      for (const f of frames) {
-        if (!f || (typeof f.isClosed === "function" && f.isClosed())) continue;
-        const ready = await f
-          .evaluate(() => {
-            const t = (document.body && document.body.innerText) || "";
-            return /Đang mở bài|Mở bài|Tay con|Nhà cái|Banker|Player/i.test(t);
-          })
-          .catch(() => false);
-        if (ready) break;
-        await helper.delay(400);
+      const fatalBefore = await detectFatalUiError().catch(() => null);
+      if (fatalBefore === "SESSION_EXPIRED" || fatalBefore === "PAGE_CLOSED") {
+        recoverFromFatalUi(fatalBefore).catch((e) => console.error("[RECOVER]", e.message));
+        return;
       }
+      // Event đã xác nhận xong ván; chờ UI ổn định ngắn rồi chụp.
+      // Không evaluate DOM ở đây vì iframe có thể treo vô hạn trên Firefox VPS.
+      await helper.delay(1200);
 
       await captureTableRound(currentInTable, {
         roundNum: latestRound?.id,
@@ -2576,16 +2923,7 @@ socket.on("new_round_completed", async (data) => {
   }
 });
 
-socket.on("place_bet", async (data) => {
-  const betSide = (data && (data.betSide || data.side)) || "P";
-  const targetNs = data?.nameService ? String(data.nameService).trim().toUpperCase() : null;
-  if (targetNs && targetNs !== nameServiceSocket) return;
-  const reqTable = data?.tableName
-    ? String(data.tableName).trim().toUpperCase()
-    : null;
-  if (reqTable && currentInTable && reqTable !== currentInTable) return;
-
-  // Chưa vào bàn / chưa notify → xếp hàng, không bỏ mất lệnh
+async function runPlaceBetCommand(betSide, betAmount) {
   if (
     !sessionInTableReady ||
     !currentInTable ||
@@ -2593,13 +2931,20 @@ socket.on("place_bet", async (data) => {
     currentInTable === "LOBBY"
   ) {
     pendingPlaceBetSide = betSide;
+    pendingPlaceBetAmount = betAmount;
     console.log(
-      `[SOCKET PLACE BET QUEUED] Chưa vào bàn xong — xếp hàng side=${betSide} (đợi notify bàn)`
+      `[SOCKET PLACE BET QUEUED] Chưa vào bàn xong — xếp hàng ` +
+      `side=${betSide} amount=${betAmount || "env"} (đợi notify bàn)`
     );
     return;
   }
   if (placeBetInFlight) {
-    console.log("[SOCKET PLACE BET IGNORED] Đang đặt cược — bỏ lệnh trùng");
+    pendingPlaceBetSide = betSide;
+    pendingPlaceBetAmount = betAmount;
+    console.log(
+      `[SOCKET PLACE BET QUEUED] Đang đặt cược — giữ lệnh mới ` +
+      `side=${betSide} amount=${betAmount || "env"}`
+    );
     return;
   }
   placeBetInFlight = true;
@@ -2612,16 +2957,44 @@ socket.on("place_bet", async (data) => {
       } + .btn_confirm`,
       logsNameProgress
     );
-    await executePlaceBet(betSide);
+    await withTimeout(executePlaceBet(betSide, betAmount), 28000, {
+      success: false,
+      reason: "timeout",
+      skipped: true,
+    });
   } catch (err) {
     console.error("[PLACE BET ERROR]", err.message);
   } finally {
     placeBetInFlight = false;
+    if (pendingPlaceBetSide && sessionInTableReady && currentInTable) {
+      const nextSide = pendingPlaceBetSide;
+      const nextAmount = pendingPlaceBetAmount;
+      pendingPlaceBetSide = null;
+      pendingPlaceBetAmount = null;
+      await helper.delay(100);
+      await runPlaceBetCommand(nextSide, nextAmount);
+    }
   }
+}
+
+socket.on("place_bet", async (data) => {
+  const betSide = (data && (data.betSide || data.side)) || "P";
+  const betAmount = Number(data?.betAmount) || null;
+  const targetNs = data?.nameService ? String(data.nameService).trim().toUpperCase() : null;
+  if (targetNs && targetNs !== nameServiceSocket) return;
+  const reqTable = data?.tableName
+    ? String(data.tableName).trim().toUpperCase()
+    : null;
+  if (reqTable && currentInTable && reqTable !== currentInTable) return;
+  await runPlaceBetCommand(betSide, betAmount);
 });
 
 // Bot không nên force nữa — chỉ cap khi new_round (tránh xóa ảnh đúng winner)
 socket.on("force_capture_now", async (data) => {
+  if (sessionRecovering || resetInFlight) {
+    console.log("[SOCKET FORCE CAPTURE SKIP] đang recover — không chụp overlay lỗi");
+    return;
+  }
   if (!currentInTable || currentInTable === "NONE" || currentInTable === "LOBBY") {
     console.log("[SOCKET FORCE CAPTURE IGNORED] Chưa ở trong bàn");
     return;
@@ -2656,6 +3029,7 @@ async function resetMain() {
     console.log("[RESET] Đang reset — bỏ lệnh trùng (chống nhân bản Chromium)");
     return resetInFlight;
   }
+  sessionRecovering = true;
   resetInFlight = (async () => {
     try {
       await clearListeners(page, [
@@ -2686,6 +3060,13 @@ async function resetMain() {
       });
     } finally {
       resetInFlight = null;
+      if (pendingResetAfterMain) {
+        pendingResetAfterMain = false;
+        console.log("[RESET] retry sau main fail trong reset trước");
+        setTimeout(() => {
+          resetMain().catch((e) => console.error("[RESET RETRY]", e.message));
+        }, 2500);
+      }
     }
   })();
   return resetInFlight;

@@ -14,6 +14,7 @@ const {
     appendToLog,
 } = require('./helper');
 const { resolveRoundStats } = require('./baccaratBigRoad');
+const { calculator_1, calculator_2 } = require('./analyzeFixedRoundsSexy');
 
 const SERVER_VERBOSE_LOG = process.env.SERVER_VERBOSE_LOG === 'true';
 const MAX_TOTAL_ROUNDS_PER_TABLE =
@@ -21,6 +22,67 @@ const MAX_TOTAL_ROUNDS_PER_TABLE =
 
 function verboseLog(...args) {
     if (SERVER_VERBOSE_LOG) console.log(...args);
+}
+
+/** percentCurrent từ thuật toán cầu (không random). */
+function buildRoadPercentCurrent(totalRoundDB) {
+    const rounds = Array.isArray(totalRoundDB) ? totalRoundDB.flat() : [];
+    const flat = rounds.filter((r) => r && (r.roadFormat || r.road != null));
+    try {
+        const a1 = calculator_1(flat);
+        const a2 = calculator_2(flat);
+        const pc1 = a1?.percentCurrent || {};
+        const pc2 = a2?.percentCurrent || {};
+        const vote = { B: 0, P: 0 };
+        for (const pc of [pc1, pc2]) {
+            const r = String(pc.Round || "").toUpperCase();
+            if (r.startsWith("B")) vote.B += 1;
+            else if (r.startsWith("P")) vote.P += 1;
+        }
+        // Streak bias từ 8 tay gần nhất
+        const bp = flat
+            .slice()
+            .sort((a, b) => Number(a.stampTime) - Number(b.stampTime))
+            .map((r) => {
+                if (r.roadFormat === "B" || r.roadFormat === "P") return r.roadFormat;
+                return checkWhoWinRound(r.road);
+            })
+            .filter((s) => s === "B" || s === "P");
+        const tail = bp.slice(-8);
+        if (tail.length >= 2) {
+            let streak = 1;
+            for (let i = tail.length - 2; i >= 0; i--) {
+                if (tail[i] === tail[tail.length - 1]) streak += 1;
+                else break;
+            }
+            if (streak >= 2) vote[tail[tail.length - 1]] += 1.5;
+            // chop
+            const flips = tail
+                .slice(1)
+                .filter((s, i) => s !== tail[i]).length;
+            if (flips >= tail.length - 1) {
+                const opp = tail[tail.length - 1] === "B" ? "P" : "B";
+                vote[opp] += 1.2;
+            }
+        }
+        const round = vote.B >= vote.P ? "B" : "P";
+        const banker = round === "B" ? Math.max(pc1.Banker || 55, 55) : Math.min(pc1.Banker || 35, 45);
+        const player = 100 - banker - Math.max(2, Math.min(12, pc1.Tier || 6));
+        const tier = 100 - banker - player;
+        const forecast = Math.max(
+            66,
+            Math.min(96, Number(pc1.Forecast) || 72)
+        );
+        return {
+            Player: Math.max(0, player),
+            Banker: Math.max(0, banker),
+            Tier: Math.max(0, tier),
+            Round: round,
+            Forecast: forecast,
+        };
+    } catch (_) {
+        return getRandomPercentages();
+    }
 }
 
 function filterData(data = []) {
@@ -247,12 +309,12 @@ async function syncNewRounds(tableName, bigRoads, dbTable) {
     }));
 
     totalRoundDB.unshift(newRounds)
-    const randomRound = getRandomPercentages()
     const calculate = calculateWinningPercentage(totalRoundDB)
+    const roadPercent = buildRoadPercentCurrent(totalRoundDB.flat ? totalRoundDB.flat() : totalRoundDB)
 
     let percent = {
-        ...randomRound,
-        Forecast: calculate,
+        ...roadPercent,
+        Forecast: calculate || roadPercent.Forecast,
     }
 
     verboseLog(percent)

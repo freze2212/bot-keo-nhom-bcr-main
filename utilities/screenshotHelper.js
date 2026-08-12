@@ -19,7 +19,7 @@ const MAX_FILES = 30;
 /**
  * Clean up screenshots: khi đủ 30 ảnh, làm lệnh xóa sạch TOÀN BỘ ảnh cũ để bắt đầu đợt ảnh mới
  */
-async function cleanOldScreenshots() {
+async function cleanOldScreenshots(keepFilename = null) {
   try {
     ensureDir();
     const files = await fs.readdir(SCREENSHOT_DIR);
@@ -28,6 +28,7 @@ async function cleanOldScreenshots() {
     if (pngFiles.length >= MAX_FILES) {
       console.log(`[SCREENSHOT CLEANUP] Đã đạt ${pngFiles.length} ảnh (>= ${MAX_FILES}). Đang xoá SẠCH toàn bộ ảnh cũ...`);
       for (const file of pngFiles) {
+        if (file === keepFilename) continue;
         const filePath = path.join(SCREENSHOT_DIR, file);
         try {
           await fs.unlink(filePath);
@@ -43,14 +44,18 @@ async function cleanOldScreenshots() {
 /**
  * Clean up old screenshots specifically for the given table before saving a new one
  */
-async function cleanOldScreenshotsForTable(tableName) {
+async function cleanOldScreenshotsForTable(tableName, keepFilename = null) {
   try {
     ensureDir();
     const cleanTable = String(tableName).trim().toUpperCase().replace(/[^A-Z0-9]/g, "") || "UNKNOWN";
     const prefix = `sexy_${cleanTable}_`;
     const files = await fs.readdir(SCREENSHOT_DIR);
     for (const file of files) {
-      if (file.startsWith(prefix) && file.endsWith(".png")) {
+      if (
+        file !== keepFilename &&
+        file.startsWith(prefix) &&
+        file.endsWith(".png")
+      ) {
         const filePath = path.join(SCREENSHOT_DIR, file);
         try {
           await fs.unlink(filePath);
@@ -157,12 +162,6 @@ async function saveScreenshot(target, tableName = "UNKNOWN", options = {}) {
   try {
     ensureDir();
 
-    // Dọn dẹp tất cả ảnh cũ của chính bàn này trước khi lưu ảnh mới
-    await cleanOldScreenshotsForTable(tableName);
-
-    // Dọn dẹp tổng thể nếu đủ 30 ảnh trước khi lưu ảnh mới
-    await cleanOldScreenshots();
-
     const cleanTable = String(tableName).trim().toUpperCase().replace(/[^A-Z0-9]/g, "") || "UNKNOWN";
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const roundStr = options.roundNum ? `_R${options.roundNum}` : "";
@@ -216,6 +215,10 @@ async function saveScreenshot(target, tableName = "UNKNOWN", options = {}) {
     if (options.trimBlack !== false) {
       await trimBlackBorders(filepath);
     }
+
+    // Chỉ xóa ảnh cũ sau khi ảnh mới đã ghi xong; luôn giữ file vừa tạo.
+    await cleanOldScreenshotsForTable(tableName, filename);
+    await cleanOldScreenshots(filename);
 
     return {
       success: true,

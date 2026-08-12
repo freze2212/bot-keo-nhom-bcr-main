@@ -12,12 +12,13 @@ const HALL_HEADERS = {
 };
 
 const AXIOS_OPTS = {
-  timeout: 45000,
+  // Poll fallback không được chặn luồng round/capture quá lâu khi Hall lỗi.
+  timeout: 12000,
   maxRedirects: 5,
 };
 
-async function requestData(sessionId) {
-  const base = process.env.URI_REQUEST_DATA;
+async function requestData(sessionId, sessionBaseUrl) {
+  const base = sessionBaseUrl || process.env.URI_REQUEST_DATA;
   if (!base) {
     console.error("URI_REQUEST_DATA missing in .env");
     return {};
@@ -86,12 +87,12 @@ async function CollectingResponseSessionV2(response, isCollecting) {
   if (!isCollecting) return;
 
   const url = response.url();
-  const status = response.status();
   const request = response.request();
   const resourceType = request.resourceType();
+  const debugNetwork = process.env.DEBUG_NETWORK === "1";
 
   try {
-    console.log(`[DEBUG] Response: ${resourceType} - ${url}`);
+    if (debugNetwork) console.log(`[DEBUG] Response: ${resourceType} - ${url}`);
     if (resourceType === "xhr" || resourceType === "fetch") {
       // sảnh rất thường hay đổi domain chỉ cần request có session thì sẽ lấy
       // Lấy headers từ request thay vì từ URL
@@ -106,10 +107,6 @@ async function CollectingResponseSessionV2(response, isCollecting) {
         sessionId = jsessionidMatch ? jsessionidMatch[1] : undefined;
 
         if (sessionId) {
-          console.log(
-            `[SESSION] Found sessionId: ${sessionId} from Request Headers`
-          );
-          console.log(`[COOKIE] Full cookie: ${cookieHeader}`);
           return sessionId;
         }
       }
@@ -119,11 +116,10 @@ async function CollectingResponseSessionV2(response, isCollecting) {
       sessionId = urlMatch ? urlMatch[1] : undefined;
 
       if (sessionId) {
-        console.log(`[SESSION] Found sessionId: ${sessionId} from URL`);
         return sessionId;
       }
 
-      console.log(`[SESSION] No sessionId found for URL: ${url}`);
+      if (debugNetwork) console.log(`[SESSION] No sessionId found for URL: ${url}`);
       return undefined;
     }
   } catch (error) {
@@ -154,7 +150,12 @@ async function sendTelegramMessage(token, idRecipient, message) {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
   try {
-    await axios.post(url, { chat_id: idRecipient, text: message });
+    await axios.post(url, {
+      chat_id: idRecipient,
+      text: message,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    });
   } catch (err) {
     console.error("Lỗi khi gửi Telegram:", err.response?.data || err.message);
   }

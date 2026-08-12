@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from telethon import TelegramClient
 from telethon.errors import (
     PasswordHashInvalidError,
@@ -278,8 +279,19 @@ def bot_api_send_photo(chat_id, filepath, caption='', parse_mode='HTML', timeout
         headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
         method='POST',
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        out = json.loads(resp.read().decode('utf-8'))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            out = json.loads(resp.read().decode('utf-8'))
+    except Exception as e:
+        detail = ''
+        try:
+            detail = e.read().decode('utf-8')  # noqa
+            error_body = json.loads(detail)
+            raise RuntimeError(error_body.get('description') or detail) from e
+        except RuntimeError:
+            raise
+        except Exception:
+            raise RuntimeError(str(e) + ((' | ' + detail) if detail else '')) from e
     if not out.get('ok'):
         raise RuntimeError(out.get('description') or str(out))
     return out
@@ -289,8 +301,7 @@ def bot_api_broadcast_text(text, parse_mode='HTML'):
     chat_ids = get_broadcast_chat_ids()
     if not chat_ids:
         raise RuntimeError('GROUP rong — them id nhom vao .env')
-    ok, fail = 0, 0
-    for cid in chat_ids:
+    def send_one(cid):
         try:
             bot_api_json(
                 'sendMessage',
@@ -301,11 +312,21 @@ def bot_api_broadcast_text(text, parse_mode='HTML'):
                     'disable_web_page_preview': True,
                 },
             )
-            ok += 1
-            log(f'[BOT API] sendMessage OK → {cid}')
+            return cid, None
         except Exception as e:
-            fail += 1
-            log(f'[BOT API] sendMessage FAIL → {cid}: {e}')
+            return cid, e
+
+    ok, fail = 0, 0
+    with ThreadPoolExecutor(max_workers=min(5, len(chat_ids))) as pool:
+        futures = [pool.submit(send_one, cid) for cid in chat_ids]
+        for future in as_completed(futures):
+            cid, error = future.result()
+            if error is None:
+                ok += 1
+                log(f'[BOT API] sendMessage OK → {cid}')
+            else:
+                fail += 1
+                log(f'[BOT API] sendMessage FAIL → {cid}: {error}')
     if ok == 0:
         raise RuntimeError(f'Bot API khong gui duoc tin nao (fail={fail})')
     return ok, fail
@@ -315,15 +336,24 @@ def bot_api_broadcast_photo(filepath, caption='', parse_mode='HTML'):
     chat_ids = get_broadcast_chat_ids()
     if not chat_ids:
         raise RuntimeError('GROUP rong — them id nhom vao .env')
-    ok, fail = 0, 0
-    for cid in chat_ids:
+    def send_one(cid):
         try:
             bot_api_send_photo(cid, filepath, caption=caption, parse_mode=parse_mode)
-            ok += 1
-            log(f'[BOT API] sendPhoto OK → {cid}')
+            return cid, None
         except Exception as e:
-            fail += 1
-            log(f'[BOT API] sendPhoto FAIL → {cid}: {e}')
+            return cid, e
+
+    ok, fail = 0, 0
+    with ThreadPoolExecutor(max_workers=min(5, len(chat_ids))) as pool:
+        futures = [pool.submit(send_one, cid) for cid in chat_ids]
+        for future in as_completed(futures):
+            cid, error = future.result()
+            if error is None:
+                ok += 1
+                log(f'[BOT API] sendPhoto OK → {cid}')
+            else:
+                fail += 1
+                log(f'[BOT API] sendPhoto FAIL → {cid}: {error}')
     if ok == 0:
         raise RuntimeError(f'Bot API khong gui duoc anh nao (fail={fail})')
     return ok, fail
@@ -669,6 +699,26 @@ def set_target_table_api(table_name):
         return None
 
 
+def request_change_table_api(table_name=None, reason='cầu xấu'):
+    """Yêu cầu session out bàn xấu → chọn bàn cầu đẹp khác."""
+    try:
+        body = {
+            'nameService': get_name_service(),
+            'reason': reason or 'cầu xấu',
+        }
+        if table_name:
+            body['tableName'] = str(table_name).strip().upper()
+        res_data = api_post_json('/api/request-change-table', body, timeout=5)
+        print(
+            f"[API ĐỔI BÀN] {body.get('tableName') or '?'} — {reason} -> {res_data}",
+            flush=True,
+        )
+        return res_data
+    except Exception as e:
+        print(f"[API ĐỔI BÀN ERROR] {e}", flush=True)
+        return None
+
+
 async def get_real_screenshot_data_async(
     table_name=None,
     min_stamp_time=None,
@@ -773,6 +823,18 @@ def get_active_table_api():
         ns = get_name_service()
         path = f'/api/get-active-table?nameService={urllib.parse.quote(ns)}'
         res_data = api_get_json(path, timeout=5)
+        if res_data.get('paused'):
+            now = time.time()
+            last_log = globals().get('_last_pause_log_at', 0)
+            if now - last_log >= 10:
+                globals()['_last_pause_log_at'] = now
+                print(
+                    "[WAIT BÀN] Hệ thống đang phân tích cầu kèo — chờ session restart",
+                    flush=True,
+                )
+            globals()['_system_paused'] = True
+            return None
+        globals()['_system_paused'] = False
         if res_data.get('success') and res_data.get('activeTable'):
             table = str(res_data['activeTable']).upper().strip()
             if table and table not in ('NONE', 'LOBBY'):
@@ -780,10 +842,15 @@ def get_active_table_api():
                 # Không có readyAt (server cũ) vẫn chấp nhận
                 return {'table': table, 'readyAt': ready_at}
         else:
-            print(
-                f"[WAIT BÀN] Playwright chưa vào bàn: {res_data.get('message') or res_data}",
-                flush=True,
-            )
+            now = time.time()
+            last_log = globals().get('_last_wait_ban_log_at', 0)
+            if now - last_log >= 10:
+                globals()['_last_wait_ban_log_at'] = now
+                print(
+                    f"[WAIT BÀN] Playwright chưa vào bàn: "
+                    f"{res_data.get('message') or res_data}",
+                    flush=True,
+                )
     except Exception as e:
         print(f"[API ACTIVE TABLE ERROR] {e}", flush=True)
     return None
@@ -804,23 +871,7 @@ def get_table_by_name_api(table_name):
         return {}
 
 
-def read_round_side(payload):
-    """percentCurrent.Round → B|P (cùng FE VÁN KẾ TIẾP)."""
-    if not isinstance(payload, dict):
-        return None
-    pc = payload.get('percentCurrent') or {}
-    if not isinstance(pc, dict):
-        pc = {}
-    raw = pc.get('Round') if pc.get('Round') is not None else pc.get('round')
-    if raw is None:
-        for key in ('ai0', 'ai1', 'ai2', 'ai3', 'ai4', 'ai5'):
-            block = payload.get(key)
-            if isinstance(block, dict):
-                bpc = block.get('percentCurrent') or {}
-                if isinstance(bpc, dict):
-                    raw = bpc.get('Round') if bpc.get('Round') is not None else bpc.get('round')
-                    if raw is not None:
-                        break
+def _norm_bp_side(raw):
     if raw is None:
         return None
     u = str(raw).strip().upper()
@@ -851,6 +902,462 @@ def road_to_side(road_or_format):
     if code in (8, 9, 10):
         return 'P'
     return 'T'
+
+
+def extract_bp_sequence(payload, limit=48):
+    """Chuỗi B/P theo thời gian tăng (bỏ Hòa) từ totalRound."""
+    rounds = payload.get('totalRound') if isinstance(payload, dict) else None
+    if not isinstance(rounds, list) or not rounds:
+        return []
+    ordered = []
+    for r in rounds:
+        if not isinstance(r, dict):
+            continue
+        try:
+            st = int(r.get('stampTime')) if r.get('stampTime') is not None else None
+        except (TypeError, ValueError):
+            st = None
+        side = road_to_side(r.get('roadFormat') or r.get('road'))
+        if side not in ('B', 'P') or st is None:
+            continue
+        ordered.append((st, side))
+    ordered.sort(key=lambda x: x[0])
+    seq = [side for _, side in ordered]
+    if limit and len(seq) > limit:
+        return seq[-limit:]
+    return seq
+
+
+def _current_streak(seq):
+    if not seq:
+        return None, 0
+    last = seq[-1]
+    n = 1
+    for i in range(len(seq) - 2, -1, -1):
+        if seq[i] == last:
+            n += 1
+        else:
+            break
+    return last, n
+
+
+def _is_chop(seq, lookback=6):
+    if len(seq) < 4:
+        return False
+    window = seq[-lookback:] if len(seq) >= lookback else seq
+    if len(window) < 4:
+        return False
+    flips = sum(1 for i in range(1, len(window)) if window[i] != window[i - 1])
+    return flips >= len(window) - 1
+
+
+def _is_two_two(seq):
+    if len(seq) < 6:
+        return False
+    tail = seq[-6:]
+    return (
+        tail[0] == tail[1]
+        and tail[2] == tail[3]
+        and tail[4] == tail[5]
+        and tail[0] != tail[2]
+        and tail[2] != tail[4]
+        and tail[0] == tail[4]
+    )
+
+
+def _pattern_next(seq, size):
+    if len(seq) < size * 2:
+        return None
+    block = tuple(seq[-size:])
+    prev = tuple(seq[-size * 2 : -size])
+    if block != prev:
+        return None
+    # Pattern lặp block → tay kế theo block[0] của chu kỳ (cùng vị trí)
+    return block[0]
+
+
+def _ngram_next(seq, n):
+    """Tìm n-gram gần nhất trong lịch sử rồi lấy ký tự kế tiếp."""
+    if len(seq) < n + 2:
+        return None
+    needle = tuple(seq[-n:])
+    votes = {'B': 0, 'P': 0}
+    for i in range(len(seq) - n - 1):
+        if tuple(seq[i : i + n]) == needle:
+            nxt = seq[i + n]
+            if nxt in votes:
+                votes[nxt] += 1
+    if votes['B'] == votes['P'] == 0:
+        return None
+    if votes['B'] == votes['P']:
+        return None
+    return 'B' if votes['B'] > votes['P'] else 'P'
+
+
+def _ai_side_from_payload(payload, key):
+    block = payload.get(key) if isinstance(payload, dict) else None
+    if not isinstance(block, dict):
+        return None, 0.0
+    pc = block.get('percentCurrent') or {}
+    if not isinstance(pc, dict):
+        return None, 0.0
+    side = _norm_bp_side(pc.get('Round') or pc.get('round'))
+    try:
+        forecast = float(pc.get('Forecast') or 0)
+    except (TypeError, ValueError):
+        forecast = 0.0
+    banker = float(pc.get('Banker') or 0)
+    player = float(pc.get('Player') or 0)
+    margin = abs(banker - player)
+    conf = max(forecast, 50.0 + margin / 2.0) / 100.0
+    return side, conf
+
+
+def decide_road_signal(payload):
+    """
+    Thuật toán cầu ensemble cho hô + đặt:
+      1) Bệt (streak) ≥2 → theo cầu
+      2) Cầu 1-1 (chop) → đảo chiều
+      3) Cầu 2-2 → tiếp tục block
+      4) Pattern / n-gram lịch sử
+      5) Bias cửa sổ gần
+      6) Vote AI1–AI4 hỗ trợ
+    Trả về dict: side B|P, confidence 0..1, reason, unstable.
+    percentCurrent.Round gốc là random — KHÔNG dùng làm tín hiệu chính.
+    """
+    seq = extract_bp_sequence(payload)
+    if len(seq) < 4:
+        return {
+            'side': None,
+            'confidence': 0.0,
+            'reason': 'thiếu cầu',
+            'unstable': True,
+            'seq_tail': ''.join(seq[-12:]),
+        }
+
+    scores = {'B': 0.0, 'P': 0.0}
+    reasons = []
+
+    # percentCurrent từ server (buildRoadPercentCurrent) — tín hiệu chính
+    pc = payload.get('percentCurrent') if isinstance(payload, dict) else None
+    if isinstance(pc, dict):
+        pc_side = _norm_bp_side(pc.get('Round') or pc.get('round'))
+        try:
+            pc_forecast = float(pc.get('Forecast') or 0)
+        except (TypeError, ValueError):
+            pc_forecast = 0.0
+        if pc_side in ('B', 'P'):
+            pc_w = 2.8 if pc_forecast >= 70 else (2.2 if pc_forecast >= 65 else 1.6)
+            scores[pc_side] += pc_w
+            reasons.append(f'road_pc→{pc_side}+{pc_w:.1f}')
+
+    last, streak = _current_streak(seq)
+    if last and streak >= 2:
+        w = 2.2 if streak >= 4 else (1.7 if streak == 3 else 1.2)
+        scores[last] += w
+        reasons.append(f'bệt{streak}{last}+{w:.1f}')
+
+    if _is_chop(seq):
+        opp = 'P' if seq[-1] == 'B' else 'B'
+        scores[opp] += 1.4
+        reasons.append(f'chop→{opp}+1.4')
+
+    if _is_two_two(seq):
+        # Sau BB PP BB → tiếp P (mở block mới đối lập)
+        nxt = 'P' if seq[-1] == 'B' else 'B'
+        scores[nxt] += 1.5
+        reasons.append(f'2-2→{nxt}+1.5')
+
+    for size in (2, 3, 4):
+        nxt = _pattern_next(seq, size)
+        if nxt in ('B', 'P'):
+            scores[nxt] += 1.1
+            reasons.append(f'repeat{size}→{nxt}+1.1')
+            break
+
+    for n in (3, 4, 5):
+        nxt = _ngram_next(seq, n)
+        if nxt in ('B', 'P'):
+            scores[nxt] += 1.0 + (n - 3) * 0.15
+            reasons.append(f'ngram{n}→{nxt}')
+            break
+
+    window = seq[-12:] if len(seq) >= 12 else seq
+    b_cnt = window.count('B')
+    p_cnt = window.count('P')
+    if b_cnt != p_cnt:
+        bias = 'B' if b_cnt > p_cnt else 'P'
+        scores[bias] += 0.7
+        reasons.append(f'bias{len(window)}→{bias}({b_cnt}/{p_cnt})')
+
+    # AI calculators (bỏ ai0 = percentCurrent random)
+    for key, weight in (('ai1', 0.9), ('ai2', 0.8), ('ai3', 0.7), ('ai4', 0.7)):
+        side, conf = _ai_side_from_payload(payload, key)
+        if side in ('B', 'P'):
+            scores[side] += weight * max(0.4, min(1.0, conf))
+            reasons.append(f'{key}→{side}')
+
+    # Không dùng percentCurrent random làm vote chính; chỉ tie-break rất nhẹ
+    pc = payload.get('percentCurrent') if isinstance(payload, dict) else None
+    if isinstance(pc, dict):
+        rnd = _norm_bp_side(pc.get('Round') or pc.get('round'))
+        if rnd in ('B', 'P') and abs(scores['B'] - scores['P']) < 0.35:
+            scores[rnd] += 0.15
+            reasons.append(f'pc_tiebreak→{rnd}')
+
+    if scores['B'] == scores['P'] == 0:
+        return {
+            'side': None,
+            'confidence': 0.0,
+            'reason': 'không có tín hiệu',
+            'unstable': True,
+            'seq_tail': ''.join(seq[-12:]),
+        }
+
+    if scores['B'] == scores['P']:
+        side = seq[-1]  # giữ quán tính khi hòa điểm
+        confidence = 0.45
+        unstable = True
+        reasons.append('hòa điểm→theo tay cuối')
+    else:
+        side = 'B' if scores['B'] > scores['P'] else 'P'
+        total = scores['B'] + scores['P']
+        margin = abs(scores['B'] - scores['P'])
+        confidence = min(0.96, 0.48 + margin / max(total, 1.0) * 0.55)
+        unstable = confidence < 0.62 or margin < 1.0
+
+    return {
+        'side': side,
+        'confidence': round(confidence, 3),
+        'reason': ', '.join(reasons[:6]) or 'ensemble',
+        'unstable': unstable,
+        'scores': {'B': round(scores['B'], 2), 'P': round(scores['P'], 2)},
+        'seq_tail': ''.join(seq[-12:]),
+        'streak': streak,
+    }
+
+
+def _max_streak_in_seq(seq):
+    if not seq:
+        return None, 0
+    best_side, best_len = seq[0], 1
+    cur_side, cur_len = seq[0], 1
+    for i in range(1, len(seq)):
+        if seq[i] == seq[i - 1]:
+            cur_len += 1
+        else:
+            cur_side, cur_len = seq[i], 1
+        if cur_len > best_len:
+            best_side, best_len = cur_side, cur_len
+    return best_side, best_len
+
+
+def analyze_road_profile(payload, window=None):
+    """
+    Phân tích cầu thực tế trên N tay B/P gần nhất (mặc định 20).
+    Trả về loại cầu, xu hướng, cửa đề xuất và có được phép hô hay không.
+    """
+    win = int(window or ROAD_ANALYSIS_WINDOW)
+    seq_all = extract_bp_sequence(payload, limit=max(win, 48))
+    seq = seq_all[-win:] if len(seq_all) >= win else seq_all
+    hand_count = len(seq)
+
+    base = {
+        'ready': False,
+        'road_type': 'WAIT',
+        'side': None,
+        'confidence': 0.0,
+        'trend': '',
+        'hand_count': hand_count,
+        'window': win,
+        'seq_display': ''.join(seq),
+        'b_count': seq.count('B'),
+        'p_count': seq.count('P'),
+        'streak': 0,
+        'streak_side': None,
+        'max_streak': 0,
+        'max_streak_side': None,
+        'chop_ratio': 0.0,
+        'reason': '',
+    }
+
+    if hand_count < ROAD_ANALYSIS_MIN_BP:
+        base['road_type'] = 'WAIT'
+        base['reason'] = f'thiếu cầu ({hand_count}/{ROAD_ANALYSIS_MIN_BP} tay B/P)'
+        base['trend'] = 'chưa đủ dữ liệu phân tích'
+        return base
+
+    last, streak = _current_streak(seq)
+    max_side, max_streak = _max_streak_in_seq(seq)
+    lookback = seq[-18:] if len(seq) >= 18 else seq
+    flips = sum(1 for i in range(1, len(lookback)) if lookback[i] != lookback[i - 1])
+    chop_ratio = flips / max(1, len(lookback) - 1)
+    b_cnt, p_cnt = base['b_count'], base['p_count']
+    bias_ratio = max(b_cnt, p_cnt) / max(1, hand_count)
+
+    road_type = 'NOISE'
+    side = None
+    confidence = 0.0
+    trend = 'cầu lộn xộn'
+
+    if chop_ratio >= 0.78 and max_streak <= 3:
+        road_type = 'CHOP'
+        side = 'P' if last == 'B' else 'B'
+        confidence = 0.52 + min(0.18, (chop_ratio - 0.78) * 2.5)
+        trend = f'cầu 1-1 đảo ({flips}/{len(lookback) - 1} lần lật)'
+    elif streak >= 3 and last in ('B', 'P'):
+        road_type = 'BET'
+        side = last
+        confidence = 0.68 + min(0.22, (streak - 3) * 0.07 + max(0, max_streak - streak) * 0.02)
+        trend = f'bệt {"Cái" if side == "B" else "Con"} x{streak}'
+    elif _is_two_two(seq):
+        road_type = 'TWO_TWO'
+        side = 'P' if last == 'B' else 'B'
+        confidence = 0.70
+        trend = 'cầu 2-2 (BB PP lặp)'
+    elif bias_ratio >= 0.58:
+        road_type = 'BIAS'
+        side = 'B' if b_cnt > p_cnt else 'P'
+        confidence = 0.62 + min(0.25, abs(b_cnt - p_cnt) / hand_count * 0.8)
+        trend = f'lệch {"Cái" if side == "B" else "Con"} {b_cnt}/{p_cnt}'
+    elif streak == 2 and last in ('B', 'P'):
+        road_type = 'BET'
+        side = last
+        confidence = 0.64
+        trend = f'bệt nhẹ {"Cái" if side == "B" else "Con"} x2'
+    else:
+        signal = decide_road_signal(payload)
+        sig_side = signal.get('side')
+        sig_conf = float(signal.get('confidence') or 0)
+        if sig_side in ('B', 'P') and sig_conf >= 0.62 and not signal.get('unstable'):
+            road_type = 'PATTERN'
+            side = sig_side
+            confidence = sig_conf
+            trend = signal.get('reason') or 'pattern ensemble'
+        else:
+            road_type = 'NOISE'
+            confidence = max(0.35, sig_conf * 0.85 if sig_conf else 0.35)
+            trend = 'cầu chưa rõ — không vào kèo'
+
+    signal = decide_road_signal(payload)
+    if side in ('B', 'P') and signal.get('side') == side:
+        confidence = min(0.96, confidence + 0.08)
+    elif side in ('B', 'P') and signal.get('side') in ('B', 'P') and signal.get('side') != side:
+        confidence = max(0.0, confidence - 0.12)
+
+    bettable = road_type not in ('CHOP', 'NOISE', 'WAIT') and confidence >= ROAD_ANALYSIS_MIN_CONF
+    reason = trend
+    if road_type == 'CHOP':
+        reason = 'cầu chop — bỏ bàn, chờ cầu khác'
+    elif road_type == 'NOISE':
+        reason = 'cầu lộn xộn — chưa đủ xu hướng'
+
+    base.update({
+        'ready': bettable,
+        'road_type': road_type,
+        'side': side,
+        'confidence': round(confidence, 3),
+        'trend': trend,
+        'streak': streak,
+        'streak_side': last,
+        'max_streak': max_streak,
+        'max_streak_side': max_side,
+        'chop_ratio': round(chop_ratio, 3),
+        'reason': reason,
+        'signal': signal,
+    })
+    return base
+
+
+def format_road_analysis_message(table_name, profile):
+    """Tin Telegram sau khi phân tích cầu 20 tay."""
+    if not isinstance(profile, dict):
+        return None
+    side = profile.get('side')
+    side_label = 'CÁI' if side == 'B' else ('CON' if side == 'P' else '—')
+    type_labels = {
+        'BET': 'BỆT',
+        'CHOP': 'CHOP 1-1',
+        'TWO_TWO': 'CẦU 2-2',
+        'BIAS': 'LỆCH CỬA',
+        'PATTERN': 'PATTERN',
+        'NOISE': 'LỘN XỘN',
+        'WAIT': 'CHỜ DỮ LIỆU',
+    }
+    road_label = type_labels.get(profile.get('road_type'), profile.get('road_type') or '?')
+    seq = profile.get('seq_display') or ''
+    hands = profile.get('hand_count') or 0
+    conf = float(profile.get('confidence') or 0) * 100
+
+    if profile.get('ready'):
+        action = f'✅ <b>SẴN SÀNG HÔ</b> — xu hướng <b>{side_label}</b> ({conf:.0f}%)'
+    elif profile.get('road_type') == 'WAIT':
+        action = '⏳ <b>ĐANG PHÂN TÍCH CẦU</b> — chưa đủ 20 tay B/P'
+    elif profile.get('road_type') == 'CHOP':
+        action = '⚠️ <b>CẦU CHOP</b> — không hô, chờ bàn/cầu khác'
+    else:
+        action = '⚠️ <b>CẦU CHƯA ỔN</b> — chờ cầu rõ hơn rồi mới hô'
+
+    return (
+        f'🔮 <b>PHÂN TÍCH CẦU {table_name}</b>\n'
+        f'📊 {hands} tay: <code>{seq or "—"}</code>\n'
+        f'📈 Loại: <b>{road_label}</b> | {profile.get("trend") or "—"}\n'
+        f'🎯 Cái/Con: {profile.get("b_count") or 0}/{profile.get("p_count") or 0} '
+        f'| Bệt max: {profile.get("max_streak") or 0}\n'
+        f'{action}\n'
+        f'{TELE_LINE}'
+    )
+
+
+def read_round_side(payload):
+    """Tín hiệu hô/đặt: ưu tiên road percentCurrent server, ensemble xác nhận."""
+    if not isinstance(payload, dict):
+        return None
+    pc = payload.get('percentCurrent') or {}
+    pc_side = None
+    pc_forecast = 0.0
+    if isinstance(pc, dict):
+        pc_side = _norm_bp_side(pc.get('Round') or pc.get('round'))
+        try:
+            pc_forecast = float(pc.get('Forecast') or 0)
+        except (TypeError, ValueError):
+            pc_forecast = 0.0
+
+    decided = decide_road_signal(payload)
+    dec_side = decided.get('side')
+    dec_conf = float(decided.get('confidence') or 0)
+    dec_unstable = bool(decided.get('unstable'))
+
+    # Road percent server + forecast cao → hô theo road
+    if pc_side in ('B', 'P') and pc_forecast >= 68:
+        if dec_side == pc_side and dec_conf >= 0.52:
+            return pc_side
+        if dec_side != pc_side and dec_conf >= 0.62:
+            return dec_side
+        return pc_side
+
+    if dec_side in ('B', 'P'):
+        if not dec_unstable and dec_conf >= 0.55:
+            return dec_side
+        if dec_conf >= 0.62:
+            return dec_side
+
+    if pc_side in ('B', 'P') and pc_forecast >= 65:
+        return pc_side
+
+    # Fallback AI blocks
+    for key in ('ai1', 'ai2', 'ai3', 'ai4'):
+        block = payload.get(key)
+        if isinstance(block, dict):
+            bpc = block.get('percentCurrent') or {}
+            if isinstance(bpc, dict):
+                side = _norm_bp_side(bpc.get('Round') or bpc.get('round'))
+                if side:
+                    return side
+    if pc_side in ('B', 'P'):
+        return pc_side
+    return None
+
 
 
 def latest_total_round(payload):
@@ -890,7 +1397,15 @@ def wait_new_bpt_round(table_name, before_stamp, timeout_s=120, poll_s=1.0):
         before_n = None
     deadline = time.time() + timeout_s
     observed_baseline = before_n
+    last_pause_check = 0.0
     while time.time() < deadline:
+        now = time.time()
+        if now - last_pause_check >= 5:
+            last_pause_check = now
+            get_active_table_api()
+            if globals().get('_system_paused'):
+                print("[WAIT RESULT] hệ thống đang recover — dừng chờ ván", flush=True)
+                return None
         payload = get_table_by_name_api(table_name)
         cur = latest_total_round(payload)
         if cur and cur.get('roadFormat') in ('B', 'P', 'T'):
@@ -913,14 +1428,21 @@ def wait_new_bpt_round(table_name, before_stamp, timeout_s=120, poll_s=1.0):
     return None
 
 
-def place_bet_api(table_name, bet_side):
+def place_bet_api(table_name, bet_side, bet_amount=None):
     try:
+        body = {"tableName": table_name, "betSide": bet_side}
+        if bet_amount is not None:
+            body["betAmount"] = float(bet_amount)
         res_data = api_post_json(
             '/api/place-bet',
-            {"tableName": table_name, "betSide": bet_side},
+            body,
             timeout=5,
         )
-        print(f"[API PLACE BET] bàn {table_name} ({bet_side}) -> {res_data}", flush=True)
+        print(
+            f"[API PLACE BET] bàn {table_name} ({bet_side}) "
+            f"mức={format_profit_k(bet_amount)}K -> {res_data}",
+            flush=True,
+        )
         return res_data
     except Exception as e:
         print(f"[API PLACE BET ERROR] {e}", flush=True)
@@ -1177,7 +1699,7 @@ async def flush_result_image_now(group, pending):
     """API đã có kết quả → chờ ảnh new_round cùng winner → gửi (1 ảnh / 1 round)."""
     if not pending:
         return group
-    await prepare_pending_image(pending, max_wait_seconds=12)
+    await prepare_pending_image(pending, max_wait_seconds=20)
     has_real = bool(pending.get('jpeg_path')) or is_real_screenshot_path(
         (pending.get('screenshot_data') or {}).get('filepath')
     )
@@ -1289,6 +1811,98 @@ def build_result_payload(is_cai, is_win, is_tie, winner=None, unit=None):
 BET_AMOUNT = float(os.getenv('BET_AMOUNT', '50') or '50')
 # Số hiện trên tin hô / caption ảnh: TAY CÁI ( 1000), Húp +1000, Gãy -1000
 UNIT_DISPLAY = int(float(os.getenv('UNIT_DISPLAY', '1000') or '1000'))
+MARTINGALE_MULTIPLIERS = (1, 2, 4)
+ROAD_ANALYSIS_WINDOW = int(os.getenv('ROAD_ANALYSIS_WINDOW', '20') or '20')
+ROAD_ANALYSIS_MIN_BP = int(os.getenv('ROAD_ANALYSIS_MIN_BP', '18') or '18')
+ROAD_ANALYSIS_MIN_CONF = float(os.getenv('ROAD_ANALYSIS_MIN_CONF', '0.65') or '0.65')
+TELE_LINE = '--------»-----★--—-«--------'
+UNSTABLE_ROAD_MESSAGE = (
+    '⚠️ <b>CẦU CHƯA ỔN ĐỊNH</b>\n'
+    'Tạm dừng 1 tay — hệ thống đang quét lại cầu.\n'
+    'Vui lòng chờ tín hiệu chuẩn. 🔮\n'
+    f'{TELE_LINE}'
+)
+
+
+def stake_for_level(level):
+    """Mức cược tối đa 3 tay: 50 → 100 → 200 (theo UNIT_DISPLAY)."""
+    idx = max(0, min(int(level or 0), len(MARTINGALE_MULTIPLIERS) - 1))
+    return UNIT_DISPLAY * MARTINGALE_MULTIPLIERS[idx]
+
+
+def daily_state_path():
+    ns = (os.getenv('NAME_SERVICE') or 'NS1').strip().upper() or 'NS1'
+    state_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+    os.makedirs(state_dir, exist_ok=True)
+    return os.path.join(state_dir, f'daily_state_{ns}.json')
+
+
+def current_pnl_day():
+    return datetime.now(TZ).date().isoformat()
+
+
+def load_daily_state():
+    today = current_pnl_day()
+    defaults = {
+        'day': today,
+        'total_profit': 0.0,
+        'stake_level': 0,
+        'prev_result_text': '—',
+        'loss_streak': 0,
+        'skip_next_round': False,
+    }
+    try:
+        with open(daily_state_path(), 'r', encoding='utf-8') as f:
+            state = json.load(f)
+        if state.get('day') != today:
+            return defaults
+        return {
+            'day': today,
+            'total_profit': float(state.get('total_profit', 0) or 0),
+            'stake_level': max(
+                0,
+                min(
+                    int(state.get('stake_level', 0) or 0),
+                    len(MARTINGALE_MULTIPLIERS) - 1,
+                ),
+            ),
+            'prev_result_text': state.get('prev_result_text') or '—',
+            'loss_streak': max(0, int(state.get('loss_streak', 0) or 0)),
+            'skip_next_round': bool(state.get('skip_next_round', False)),
+        }
+    except Exception:
+        return defaults
+
+
+def save_daily_state(
+    day,
+    total_profit,
+    stake_level,
+    prev_result_text,
+    loss_streak,
+    skip_next_round,
+):
+    path = daily_state_path()
+    temp_path = f'{path}.tmp.{os.getpid()}'
+    payload = {
+        'day': day,
+        'total_profit': float(total_profit),
+        'stake_level': int(stake_level),
+        'prev_result_text': prev_result_text,
+        'loss_streak': int(loss_streak),
+        'skip_next_round': bool(skip_next_round),
+    }
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(temp_path, path)
+    except Exception as e:
+        print(f'[DAILY STATE WARN] Không lưu được state: {e}', flush=True)
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
 
 
 def format_profit_k(amount):
@@ -1304,7 +1918,7 @@ def format_profit_k(amount):
 
 def build_ho_message(table_name, is_cai, bet_amount, prev_result_text, total_profit, unit=None):
     """Nội dung hô — HTML bold các chỗ quan trọng (Tele không hỗ trợ nháy màu thật)."""
-    tay = 'TAY CÁI' if is_cai else 'TAY CON'
+    tay = '🔴 CÁI' if is_cai else '🔵 CON'
     table = str(table_name or '').strip().upper()
     u = int(unit if unit is not None else UNIT_DISPLAY)
     # Số tiền Tele = UNIT_DISPLAY (1000); BET_AMOUNT chỉ để PW chọn chip UI
@@ -1321,7 +1935,7 @@ def build_ho_message(table_name, is_cai, bet_amount, prev_result_text, total_pro
     else:
         prev_show = prev
     return (
-        f"✅ TAY SAU ĐÁNH: <b>{tay} ( {u} )</b>\n"
+        f"✅ TAY SAU ĐÁNH: <b>{tay}</b>\n"
         f"🔈ĐẶT CƯỢC: <b>{stake} K</b>\n"
         f"——————————————\n"
         f"⚡️KẾT QUẢ VÁN TRƯỚC: <b>{prev_show}</b>\n"
@@ -1390,20 +2004,57 @@ async def daily_schedule(client, group):
         last_announced_table = None
         round_count = 0
         bot_started_ms = int(time.time() * 1000)
-        total_profit = 0.0
-        prev_result_text = '—'
+        daily_state = load_daily_state()
+        pnl_day = daily_state['day']
+        total_profit = daily_state['total_profit']
+        stake_level = daily_state['stake_level']
+        prev_result_text = daily_state['prev_result_text']
+        loss_streak = daily_state['loss_streak']
+        skip_next_round = daily_state['skip_next_round']
         last_result_stamp = None
         last_ho_key = None
+        last_stale_log_at = 0.0
+        road_profile_cache = {}
+        road_analysis_stamp = None
+        last_road_log_at = 0.0
         print(
             "[FLOW] 1 bot | API kết quả → CAP → GỬI ẢNH NGAY → chờ Round → HÔ → đặt",
             flush=True,
         )
-        print(f"[PNL] UNIT_DISPLAY={format_profit_k(UNIT_DISPLAY)} K / ván (chip UI BET_AMOUNT={format_profit_k(BET_AMOUNT)})", flush=True)
+        print(
+            f"[PNL] ngày={pnl_day} tổng={format_profit_k(total_profit)}K "
+            f"| mức kế={format_profit_k(stake_for_level(stake_level))}K "
+            f"| UNIT_DISPLAY={format_profit_k(UNIT_DISPLAY)}K",
+            flush=True,
+        )
         print(f"[TELE OUT] log file = {TELE_OUT_LOG}", flush=True)
 
         while True:
+            today = current_pnl_day()
+            if today != pnl_day:
+                pnl_day = today
+                total_profit = 0.0
+                stake_level = 0
+                prev_result_text = '—'
+                loss_streak = 0
+                skip_next_round = False
+                save_daily_state(
+                    pnl_day,
+                    total_profit,
+                    stake_level,
+                    prev_result_text,
+                    loss_streak,
+                    skip_next_round,
+                )
+                print(
+                    f"[PNL DAILY RESET] 00:00 GMT+7 ngày {pnl_day} → tổng lãi = 0",
+                    flush=True,
+                )
+
             active = get_active_table_api()
             if not active:
+                if globals().get('_system_paused'):
+                    last_announced_table = None
                 await asyncio.sleep(1)
                 continue
 
@@ -1422,23 +2073,29 @@ async def daily_schedule(client, group):
                     pass
 
             if target_table != last_announced_table:
+                road_profile_cache.pop(target_table, None)
+                road_analysis_stamp = None
                 if last_announced_table is None:
                     announce_msg = (
-                        f"🎰 **BÁO BÀN TARGET: {target_table}**\n"
-                        f"AE vào đúng bàn **{target_table}** theo lệnh nhé!"
+                        f"🎰 <b>BÁO BÀN: {target_table}</b>\n"
+                        f"AE vào đúng bàn <b>{target_table}</b> theo lệnh.\n"
+                        f"{TELE_LINE}"
                     )
                     log_label = f"[BÁO BÀN] lần đầu → {target_table}"
                 else:
                     announce_msg = (
-                        f"🔄 **ĐỔI BÀN: {last_announced_table} → {target_table}**\n"
-                        f"AE chuyển sang bàn **{target_table}** nhé!"
+                        f"🔄 <b>ĐỔI BÀN: {last_announced_table} → {target_table}</b>\n"
+                        f"AE chuyển sang bàn <b>{target_table}</b>.\n"
+                        f"{TELE_LINE}"
                     )
                     log_label = f"[ĐỔI BÀN] {last_announced_table} → {target_table}"
-                total_profit = 0.0
-                prev_result_text = '—'
                 last_result_stamp = None
                 last_ho_key = None
-                print(f"[PNL] Reset tổng lãi về 0 (bàn {target_table})", flush=True)
+                print(
+                    f"[PNL] Giữ tổng lãi {format_profit_k(total_profit)}K "
+                    f"khi chuyển sang bàn {target_table}",
+                    flush=True,
+                )
                 try:
                     group = await send_announce_message(group, announce_msg)
                     print(log_label, flush=True)
@@ -1453,22 +2110,158 @@ async def daily_schedule(client, group):
                         print(f"[BÁO BÀN RETRY OK] {log_label}", flush=True)
                     except Exception as e2:
                         print(f"[BÁO BÀN RETRY FAIL] {e2}", flush=True)
+                try:
+                    table_payload = await asyncio.to_thread(
+                        get_table_by_name_api, target_table
+                    )
+                    profile = analyze_road_profile(table_payload)
+                    road_profile_cache[target_table] = profile
+                    latest_at_entry = latest_total_round(table_payload) or {}
+                    road_analysis_stamp = latest_at_entry.get('stampTime')
+                    road_msg = format_road_analysis_message(target_table, profile)
+                    if road_msg:
+                        group = await send_announce_message(group, road_msg)
+                    print(
+                        f"[PHÂN TÍCH CẦU] {target_table} type={profile.get('road_type')} "
+                        f"ready={profile.get('ready')} conf={profile.get('confidence')} "
+                        f"seq={profile.get('seq_display')} | {profile.get('trend')}",
+                        flush=True,
+                    )
+                except Exception as e_road:
+                    print(f"[PHÂN TÍCH CẦU ERROR] {e_road}", flush=True)
                 await asyncio.sleep(0.3)
 
             round_side = None
             before_payload = {}
             before_stamp = None
+            signal_is_fresh = False
+            road_decision = None
             round_wait_deadline = time.time() + 60
             while time.time() < round_wait_deadline:
+                active_now = get_active_table_api()
+                if (
+                    not active_now
+                    or str(active_now.get('table') or '').upper() != str(target_table).upper()
+                ):
+                    print(
+                        "[WAIT API] Mất bàn / hệ thống đang recover — dừng hô",
+                        flush=True,
+                    )
+                    last_announced_table = None
+                    signal_is_fresh = False
+                    break
                 before_payload = await asyncio.to_thread(get_table_by_name_api, target_table)
                 before = latest_total_round(before_payload) or {}
                 before_stamp = before.get('stampTime')
-                round_side = read_round_side(before_payload)
+
+                profile = analyze_road_profile(before_payload)
+                road_profile_cache[target_table] = profile
+                if not profile.get('ready'):
+                    bad_type = profile.get('road_type') in ('CHOP', 'NOISE')
+                    enough_hands = int(profile.get('hand_count') or 0) >= ROAD_ANALYSIS_MIN_BP
+                    if bad_type and enough_hands:
+                        if time.time() - last_road_log_at >= 8:
+                            last_road_log_at = time.time()
+                            print(
+                                f"[PHÂN TÍCH CẦU] {target_table} cầu xấu "
+                                f"type={profile.get('road_type')} — yêu cầu đổi bàn",
+                                flush=True,
+                            )
+                        try:
+                            road_msg = format_road_analysis_message(target_table, profile)
+                            if road_msg:
+                                group = await send_announce_message(group, road_msg)
+                        except Exception:
+                            pass
+                        await asyncio.to_thread(
+                            request_change_table_api,
+                            target_table,
+                            profile.get('reason') or 'cầu xấu',
+                        )
+                        last_announced_table = None
+                        road_profile_cache.pop(target_table, None)
+                        signal_is_fresh = False
+                        await asyncio.sleep(3)
+                        break
+                    if time.time() - last_road_log_at >= 12:
+                        last_road_log_at = time.time()
+                        print(
+                            f"[PHÂN TÍCH CẦU] {target_table} chưa sẵn sàng — "
+                            f"type={profile.get('road_type')} "
+                            f"({profile.get('hand_count')}/{ROAD_ANALYSIS_MIN_BP}) "
+                            f"| {profile.get('reason')}",
+                            flush=True,
+                        )
+                    await asyncio.sleep(2)
+                    continue
+                # Hô theo cửa cầu đẹp đã chốt (ưu tiên profile.side)
+                if road_analysis_stamp is not None and before_stamp is not None:
+                    try:
+                        if int(before_stamp) <= int(road_analysis_stamp):
+                            if time.time() - last_road_log_at >= 8:
+                                last_road_log_at = time.time()
+                                print(
+                                    f"[PHÂN TÍCH CẦU] {target_table} chờ ván mới "
+                                    f"sau phân tích 20 tay (stamp={before_stamp})",
+                                    flush=True,
+                                )
+                            await asyncio.sleep(1.2)
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+
+                road_decision = decide_road_signal(before_payload)
+                # Ưu tiên cửa từ phân tích cầu đẹp; ensemble chỉ hỗ trợ khi thiếu
+                profile_side = profile.get('side')
+                if (
+                    profile_side in ('B', 'P')
+                    and float(profile.get('confidence') or 0) >= ROAD_ANALYSIS_MIN_CONF
+                ):
+                    round_side = profile_side
+                else:
+                    round_side = road_decision.get('side') if road_decision else None
+                    if round_side not in ('B', 'P'):
+                        round_side = read_round_side(before_payload)
                 if round_side in ('B', 'P'):
+                    try:
+                        round_age_s = (
+                            (time.time() * 1000 - int(before_stamp)) / 1000
+                            if before_stamp is not None
+                            else 10**9
+                        )
+                    except (TypeError, ValueError):
+                        round_age_s = 10**9
+                    if round_age_s > 180:
+                        if time.time() - last_stale_log_at >= 15:
+                            last_stale_log_at = time.time()
+                            print(
+                                f"[WAIT API STALE] {target_table} totalRound cũ "
+                                f"{round_age_s:.0f}s — không hô, không out bàn",
+                                flush=True,
+                            )
+                        await asyncio.sleep(2)
+                        continue
+                    # Cầu quá yếu → bỏ ván này, chờ cầu rõ hơn
+                    if (
+                        road_decision
+                        and road_decision.get('unstable')
+                        and float(road_decision.get('confidence') or 0) < 0.58
+                    ):
+                        if time.time() - last_stale_log_at >= 10:
+                            last_stale_log_at = time.time()
+                            print(
+                                f"[CẦU YẾU] {target_table} conf={road_decision.get('confidence')} "
+                                f"seq={road_decision.get('seq_tail')} "
+                                f"reason={road_decision.get('reason')} — bỏ tín hiệu",
+                                flush=True,
+                            )
+                        await asyncio.sleep(1.2)
+                        continue
                     ho_key = f"{target_table}|{round_side}|{before_stamp}"
                     if ho_key == last_ho_key:
                         await asyncio.sleep(0.4)
                         continue
+                    signal_is_fresh = True
                     break
                 print(
                     f"[WAIT API] {target_table} chưa có Round B/P — poll lại...",
@@ -1476,33 +2269,79 @@ async def daily_schedule(client, group):
                 )
                 await asyncio.sleep(0.35)
 
-            if round_side not in ('B', 'P'):
+            if not signal_is_fresh:
                 print(
-                    "[WAIT API] Timeout 60s không có Round từ API → RESTART session",
+                    "[WAIT API] Chưa có tín hiệu round mới — giữ nguyên bàn, không restart",
                     flush=True,
                 )
-                await asyncio.to_thread(request_session_restart_api)
-                last_announced_table = None
-                total_profit = 0.0
-                prev_result_text = '—'
-                last_result_stamp = None
+                await asyncio.sleep(3)
+                continue
+
+            if skip_next_round:
+                skip_key = f"{target_table}|{round_side}|{before_stamp}"
+                last_ho_key = skip_key
+                print(
+                    f"[BỎ 1 TAY] {target_table} Round={round_side} "
+                    "— không hô, không đặt; chờ ván kết thúc",
+                    flush=True,
+                )
+                skipped_round = await asyncio.to_thread(
+                    wait_new_bpt_round, target_table, before_stamp, 60, 0.25
+                )
+                if not skipped_round:
+                    print(
+                        "[BỎ 1 TAY WARN] Chưa thấy kết quả — tiếp tục giữ trạng thái bỏ tay",
+                        flush=True,
+                    )
+                    await asyncio.sleep(2)
+                    continue
+                skipped_stamp = skipped_round.get('stampTime')
+                try:
+                    last_result_stamp = int(skipped_stamp)
+                except (TypeError, ValueError):
+                    last_result_stamp = None
+                skip_next_round = False
                 last_ho_key = None
-                await asyncio.sleep(8)
+                save_daily_state(
+                    pnl_day,
+                    total_profit,
+                    stake_level,
+                    prev_result_text,
+                    loss_streak,
+                    skip_next_round,
+                )
+                print(
+                    f"[BỎ 1 TAY XONG] winner={skipped_round.get('roadFormat')} "
+                    "— ván kế tiếp hô lại từ 50K",
+                    flush=True,
+                )
                 continue
 
             is_cai = round_side == 'B'
             side = 'B' if is_cai else 'P'
             label = 'CÁI' if is_cai else 'CON'
+            current_stake = stake_for_level(stake_level)
             round_count += 1
             last_ho_key = f"{target_table}|{round_side}|{before_stamp}"
+            if not road_decision:
+                road_decision = decide_road_signal(before_payload)
+            road_profile = road_profile_cache.get(target_table) or analyze_road_profile(before_payload)
+            print(
+                f"[CẦU] {target_table} → {label} conf={road_decision.get('confidence')} "
+                f"profile={road_profile.get('road_type')}({road_profile.get('confidence')}) "
+                f"unstable={road_decision.get('unstable')} "
+                f"scores={road_decision.get('scores')} "
+                f"seq={road_decision.get('seq_tail')} | {road_decision.get('reason')}",
+                flush=True,
+            )
 
             bet_msg = build_ho_message(
                 target_table,
                 is_cai,
-                UNIT_DISPLAY,
+                current_stake,
                 prev_result_text,
                 total_profit,
-                unit=UNIT_DISPLAY,
+                unit=current_stake,
             )
 
             print(f"[FLOW] HÔ #{round_count} {label} (1 tin / round)...", flush=True)
@@ -1528,7 +2367,9 @@ async def daily_schedule(client, group):
 
             print("[FLOW] Place bet ngay sau hô...", flush=True)
             log_timing('PLACE_BET_START', f"#{round_count} side={side}", t_round)
-            place_res = await asyncio.to_thread(place_bet_api, target_table, side)
+            place_res = await asyncio.to_thread(
+                place_bet_api, target_table, side, current_stake
+            )
             log_timing(
                 'PLACE_BET_API',
                 f"#{round_count} res={place_res}",
@@ -1557,17 +2398,12 @@ async def daily_schedule(client, group):
             )
             if not new_round:
                 print(
-                    "[FE SYNC WARN] Timeout 60s không có API ván mới → RESTART session",
+                    "[FE SYNC WARN] Timeout 60s không có API ván mới "
+                    "→ giữ bàn và khóa tín hiệu cũ, không hô lặp",
                     flush=True,
                 )
                 log_timing('WAIT_RESULT_TIMEOUT', f"#{round_count}", t_round)
-                await asyncio.to_thread(request_session_restart_api)
-                last_announced_table = None
-                total_profit = 0.0
-                prev_result_text = '—'
-                last_result_stamp = None
-                last_ho_key = None
-                await asyncio.sleep(8)
+                await asyncio.sleep(3)
                 continue
 
             winner = new_round.get('roadFormat')
@@ -1603,7 +2439,7 @@ async def daily_schedule(client, group):
                 is_win, is_tie = False, False
 
             total_profit, pnl_delta = apply_round_pnl(
-                total_profit, UNIT_DISPLAY, is_win, is_tie, is_cai
+                total_profit, current_stake, is_win, is_tie, is_cai
             )
             if is_tie:
                 prev_result_text = 'HÒA'
@@ -1621,7 +2457,36 @@ async def daily_schedule(client, group):
             )
 
             result_type, result_caption = build_result_payload(
-                is_cai, is_win, is_tie, winner=winner, unit=UNIT_DISPLAY
+                is_cai, is_win, is_tie, winner=winner, unit=current_stake
+            )
+            completed_three_loss_cycle = False
+            if is_tie:
+                next_stake_level = stake_level
+            elif is_win:
+                next_stake_level = 0
+                loss_streak = 0
+            else:
+                loss_streak += 1
+                if stake_level >= len(MARTINGALE_MULTIPLIERS) - 1:
+                    next_stake_level = 0
+                    completed_three_loss_cycle = True
+                    skip_next_round = True
+                    loss_streak = 0
+                else:
+                    next_stake_level = stake_level + 1
+            print(
+                f"[GẤP THẾP] mức {format_profit_k(current_stake)}K "
+                f"→ ván sau {format_profit_k(stake_for_level(next_stake_level))}K",
+                flush=True,
+            )
+            stake_level = next_stake_level
+            save_daily_state(
+                pnl_day,
+                total_profit,
+                stake_level,
+                prev_result_text,
+                loss_streak,
+                skip_next_round,
             )
             # min_stamp: lúc API ra kết quả (trừ buffer) — ảnh phải thuộc ván này
             pending = {
@@ -1635,6 +2500,21 @@ async def daily_schedule(client, group):
                 'result_stamp': result_stamp,
             }
             group = await flush_result_image_now(group, pending)
+            if completed_three_loss_cycle:
+                try:
+                    group = await send_announce_message(
+                        group, UNSTABLE_ROAD_MESSAGE
+                    )
+                    print(
+                        "[CẢNH BÁO CẦU] Đã thua đủ 3 tay "
+                        "50K → 100K → 200K; ván tới bỏ 1 tay",
+                        flush=True,
+                    )
+                except Exception as warning_error:
+                    print(
+                        f"[CẢNH BÁO CẦU ERROR] {warning_error}",
+                        flush=True,
+                    )
             shot = pending.get('screenshot_data') or {}
             shot_w = road_to_side(shot.get('resultWinner'))
             if shot_w and shot_w != winner:
