@@ -1136,20 +1136,20 @@ async function detectSessionExpired() {
     "please log in again",
     "bạn đã liên tục đăng nhập",
     "tự động đăng xuất",
-    "xin lỗi",
+    "xin lỗi !! bạn đã liên tục đăng nhập",
+    "xin lỗi!! bạn đã liên tục đăng nhập",
     "lỗi mạng",
     "loi mang",
     "network error",
     "connection error",
     "mất kết nối",
     "mat ket noi",
-    "kết nối mạng",
     "làm mới đường truyền thất bại",
     "logged on at another location",
     "logged in at another location",
     "logged off because you have logged on",
     "logged off because you have logged in",
-    "another location",
+    "you have been logged off",
   ];
   const frames = [
     gameCurrentFrame,
@@ -1271,11 +1271,10 @@ async function detectFatalUiError(options = {}) {
   if (!page || page.isClosed()) return "PAGE_CLOSED";
   const expired = await detectSessionExpired().catch(() => false);
   if (expired) return "SESSION_EXPIRED";
-  // Luôn check canvas khi chụp / đổi bàn; throttle chỉ cho heartbeat.
-  const checkCanvas = options.checkCanvas !== false;
-  if (checkCanvas) {
+  // Chỉ quét canvas khi gọi rõ (chụp/đổi bàn/heartbeat). Tránh spam screenshot ngầm.
+  if (options.checkCanvas) {
     const canvasExpired = await detectCanvasSessionExpired(
-      !!options.forceCanvas || options.checkCanvas === true
+      !!options.forceCanvas
     ).catch(() => false);
     if (canvasExpired) return "SESSION_EXPIRED";
   }
